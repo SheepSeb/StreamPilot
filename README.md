@@ -20,6 +20,16 @@ flies by onboard vision.
 
   One observation has no motion information, so stack frames (e.g. `gymnasium.wrappers.FrameStackObservation`).
 
+  This is the onboard camera itself, with the `"detection"` box drawn in green:
+
+  <table>
+  <tr>
+  <td align="center"><img src="docs/media/waypoint_onboard.png" width="200"><br>waypoint</td>
+  <td align="center"><img src="docs/media/landing_onboard.png" width="200"><br>landing</td>
+  <td align="center"><img src="docs/media/tracking_onboard.png" width="200"><br>tracking</td>
+  </tr>
+  </table>
+
 | ID                 | Task | Detector target |
 | ------------------ | ---- | --------------- |
 | `DroneWaypoint-v0` | Reach a sequence of waypoints at flight altitude; only the current one is shown | green ball |
