@@ -28,6 +28,21 @@ class RunningMeanStd:
         if self.count > 1:
             self.var = self._m2 / (self.count - 1)
 
+    def update_batch(self, x) -> None:
+        """Add every row of ``x`` at once (Chan et al.'s parallel update; equal to ``update`` per row)."""
+        x = np.asarray(x, dtype=np.float64).reshape(-1, *np.shape(self.mean))
+        n = len(x)
+        if n == 0:
+            return
+        batch_mean = x.mean(axis=0)
+        delta = batch_mean - self.mean
+        total = self.count + n
+        self.mean = self.mean + delta * (n / total)
+        self._m2 = self._m2 + ((x - batch_mean) ** 2).sum(axis=0) + delta**2 * (self.count * n / total)
+        self.count = total
+        if total > 1:
+            self.var = self._m2 / (total - 1)
+
     def state_dict(self) -> dict:
         return {"mean": self.mean, "var": self.var, "m2": self._m2, "count": self.count}
 

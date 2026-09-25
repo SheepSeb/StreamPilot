@@ -13,6 +13,8 @@ from gymnasium.spaces import Box
 SCENE_XML = Path(__file__).resolve().parent.parent / "assets" / "skydio_x2" / "scene.xml"
 ONBOARD_CAMERA = "onboard"
 ALTITUDE_GAIN = 2.0  # 1/s, altitude-hold correction
+# Corner signs of a box, (8, 3).
+_BOX_SIGNS = np.array(np.meshgrid([-1, 1], [-1, 1], [-1, 1])).reshape(3, -1).T
 
 
 def wrap_angle(angle):
@@ -22,9 +24,8 @@ def wrap_angle(angle):
 def geom_corners(model, data, geom_id: int) -> np.ndarray:
     """World-frame corners ``(8, 3)`` of ``geom_id``'s bounding box."""
     center, half = model.geom_aabb[geom_id, :3], model.geom_aabb[geom_id, 3:]
-    signs = np.array(np.meshgrid([-1, 1], [-1, 1], [-1, 1])).reshape(3, -1).T
     geom_mat = data.geom_xmat[geom_id].reshape(3, 3)
-    return data.geom_xpos[geom_id] + (center + signs * half) @ geom_mat.T
+    return data.geom_xpos[geom_id] + (center + _BOX_SIGNS * half) @ geom_mat.T
 
 
 def project_box(model, data, geom_id: int, cam_id: int, min_size: float) -> np.ndarray:
@@ -43,8 +44,8 @@ def project_points(model, data, corners, cam_id: int, min_size: float) -> np.nda
     scale = 0.5 / np.tan(np.deg2rad(model.cam_fovy[cam_id]) / 2)
     u = 0.5 + scale * local[:, 0] / -local[:, 2]
     v = 0.5 - scale * local[:, 1] / -local[:, 2]
-    u0, u1 = np.clip([u.min(), u.max()], 0.0, 1.0)
-    v0, v1 = np.clip([v.min(), v.max()], 0.0, 1.0)
+    u0, u1 = min(max(float(u.min()), 0.0), 1.0), min(max(float(u.max()), 0.0), 1.0)
+    v0, v1 = min(max(float(v.min()), 0.0), 1.0), min(max(float(v.max()), 0.0), 1.0)
     w, h = u1 - u0, v1 - v0
     if min(w, h) < min_size:
         return np.zeros(5)

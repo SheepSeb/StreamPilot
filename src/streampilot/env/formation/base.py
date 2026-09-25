@@ -140,6 +140,9 @@ class FormationBaseEnv(SceneEnv):
         actuators = ("vx", "vy", "vz", "yaw_rate")
         self._ctrl_adr = np.array([[self.model.actuator(f"d{i}_{a}").id for a in actuators] for i in range(num_drones)])
         self._onboard_cam_ids = [self.model.camera(f"d{i}_{ONBOARD_CAMERA}").id for i in range(num_drones)]
+        # Teammates of each drone in drone order, (num_drones, num_drones - 1), and every pair.
+        self._teammate_idx = np.array([[j for j in range(num_drones) if j != i] for i in range(num_drones)], dtype=int)
+        self._pairs = np.triu_indices(num_drones, k=1)
         body_ids = [self.model.body(f"d{i}_x2").id for i in range(num_drones)]
         # Each drone's visual mesh (vertices in its geom frame), for teammate detection.
         meshes = self.model.geom_type == mujoco.mjtGeom.mjGEOM_MESH
@@ -187,7 +190,8 @@ class FormationBaseEnv(SceneEnv):
         mujoco.mj_forward(self.model, self.data)
         if self.render_mode == "human":
             self.render()
-        return self._get_obs(), self._get_info(self._task_info())
+        dets = self.target_detections()
+        return self._get_obs(dets), self._get_info(self._task_info(), dets)
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=np.float64).reshape(self.num_drones, 3), -1.0, 1.0)
@@ -215,7 +219,8 @@ class FormationBaseEnv(SceneEnv):
 
         if self.render_mode == "human":
             self.render()
-        return self._get_obs(), reward, terminated, False, self._get_info(info)
+        dets = self.target_detections()
+        return self._get_obs(dets), reward, terminated, False, self._get_info(info, dets)
 
     def detect(self, drone: int, geom_id: int) -> np.ndarray:
         """Exact ``[visible, cx, cy, w, h]`` box of ``geom_id`` in ``drone``'s onboard camera."""
@@ -234,13 +239,19 @@ class FormationBaseEnv(SceneEnv):
                 boxes.append(project_points(self.model, self.data, points, cam, self.min_detection_size))
         return np.array(boxes).reshape(self.num_drones - 1, 5)
 
-    def detection_obs(self) -> np.ndarray:
-        """Each drone's detection of its task target, as a noisy detector would report it."""
+    def target_detections(self) -> np.ndarray:
+        """``(num_drones, 5)``: each drone's exact detection of its task target."""
+        return np.array([self.detect(i, self._task_target_geom(i)) for i in range(self.num_drones)])
+
+    def detection_obs(self, exact: np.ndarray | None = None) -> np.ndarray:
+        """Each drone's detection of its task target, as a noisy detector would report it.
+        ``exact``: the output of ``target_detections``, if already computed this step."""
+        exact = self.target_detections() if exact is None else exact
         dets = np.zeros((self.num_drones, 5))
-        for i in range(self.num_drones):
-            det = self.detect(i, self._task_target_geom(i))
+        for i, det in enumerate(exact):
             if det[0] == 0.0 or self.np_random.random() < self.detection_dropout:
                 continue
+            det = det.copy()
             det[1:] += self.np_random.normal(scale=self.detection_noise, size=4)
             dets[i] = np.clip(det, 0.0, 1.0)
         return dets
@@ -248,11 +259,11 @@ class FormationBaseEnv(SceneEnv):
     def teammates(self) -> np.ndarray:
         """``(num_drones, 2 * (num_drones - 1))``: teammate positions relative to each drone, in
         its body frame."""
-        rows = []
-        for i, (pos, yaw) in enumerate(zip(self.drone_pos[:, :2], self.drone_yaw)):
-            rel = np.delete(self.drone_pos[:, :2], i, axis=0) - pos
-            rows.append((rel @ rotation([np.cos(yaw), np.sin(yaw)])).ravel())
-        return np.array(rows).reshape(self.num_drones, -1)
+        xy, yaw = self.drone_pos[:, :2], self.drone_yaw
+        rel = xy[self._teammate_idx] - xy[:, None]  # (num_drones, num_drones - 1, 2), world frame
+        c, s = np.cos(yaw)[:, None], np.sin(yaw)[:, None]
+        x, y = rel[..., 0], rel[..., 1]
+        return np.stack([x * c + y * s, -x * s + y * c], axis=-1).reshape(self.num_drones, -1)
 
     def state_obs(self) -> np.ndarray:
         yaw = self.drone_yaw
@@ -271,8 +282,8 @@ class FormationBaseEnv(SceneEnv):
 
     def min_pairwise_distance(self) -> float:
         xy = self.drone_pos[:, :2]
-        dists = np.linalg.norm(xy[:, None] - xy[None], axis=-1)
-        return float(np.min(dists[np.triu_indices(self.num_drones, k=1)], initial=np.inf))
+        a, b = self._pairs
+        return float(np.min(np.linalg.norm(xy[a] - xy[b], axis=-1), initial=np.inf))
 
     # --- helpers for subclasses -------------------------------------------------------
 
@@ -312,16 +323,15 @@ class FormationBaseEnv(SceneEnv):
     def _out_of_bounds(self) -> bool:
         return bool(np.max(np.abs(self.drone_pos[:, :2])) > self.arena_half_extent)
 
-    def _get_obs(self) -> np.ndarray:
+    def _get_obs(self, dets: np.ndarray) -> np.ndarray:
         if self.obs_mode == "pixels":
             return np.stack([self.onboard_image(i) for i in range(self.num_drones)])
         if self.obs_mode == "state":
             return self.state_obs()
-        return np.hstack([self.detection_obs(), np.eye(self.num_drones), self.teammates()]).astype(np.float32)
+        return np.hstack([self.detection_obs(dets), np.eye(self.num_drones), self.teammates()]).astype(np.float32)
 
-    def _get_info(self, info: dict[str, Any]) -> dict[str, Any]:
-        n = range(self.num_drones)
-        info["target_in_view"] = np.array([bool(self.detect(i, self._task_target_geom(i))[0]) for i in n])
+    def _get_info(self, info: dict[str, Any], dets: np.ndarray) -> dict[str, Any]:
+        info["target_in_view"] = dets[:, 0].astype(bool)
         return info
 
     # --- task hooks -------------------------------------------------------------------

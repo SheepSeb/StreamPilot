@@ -72,6 +72,17 @@ a column (one drone in front of the other) for two drones, an equilateral triang
 | `DroneFormationLanding-v0`  | One pad. The drones land in the formation shape: the leader on the pad, the others on spots behind it. They hand off together, each 1.2 m in front of its landing spot, facing the pad with it in view (`info["handoff_offset"]`, one row per drone) |
 | `DroneFormationTracking-v0` | The leader follows the pillar at 1.5 m, the others hold their slots behind it, and all of them face the target |
 
+<table>
+<tr>
+<td align="center"><img src="docs/media/formation_waypoint.gif" width="260"><br><code>DroneFormationWaypoint-v0</code></td>
+<td align="center"><img src="docs/media/formation_landing.gif" width="260"><br><code>DroneFormationLanding-v0</code></td>
+<td align="center"><img src="docs/media/formation_tracking.gif" width="260"><br><code>DroneFormationTracking-v0</code></td>
+</tr>
+</table>
+
+Scripted controllers, overview camera, three drones. The insets are each drone's onboard view
+(leader on the left), with teammates it can see boxed in magenta.
+
 The formation frame points from the leader to the target, so the team can approach from any side.
 
 - **Action:** `(num_drones, 3)`, one body-frame `[vx, vy, yaw_rate]` row per drone.
@@ -94,7 +105,7 @@ uv run streampilot formation-waypoint                   # 3 drones, scripted con
 uv run streampilot formation-landing --drones 2
 ```
 
-`streampilot-train` does not support the formation tasks yet.
+To train them, use `streampilot-train-formation` ([MAPPO](#training-the-formation-tasks-with-mappo)).
 
 ## Watching the tasks
 
@@ -163,6 +174,53 @@ features and rewards, since running statistics would drift away from the transit
 replay buffer. On one core, PPO runs about 1600 steps/s, Stream AC about 700 and SAC about 150,
 so 2M steps of SAC take roughly 4 h.
 
+## Training the formation tasks with MAPPO
+
+`streampilot-train-formation` trains the formation tasks with MAPPO ([Yu et al. 2022](https://arxiv.org/abs/2103.01955)),
+the multi-agent version of the PPO baseline, on many environments at once:
+
+```sh
+uv run streampilot-train-formation formation-waypoint              # 3 drones, 64 envs, 20M team steps
+uv run streampilot-train-formation formation-landing --drones 2 --num-envs 128
+uv run streampilot-train-formation formation-tracking --help       # all options and hyperparameters
+uv run streampilot formation-landing --policy runs/mappo_formation-landing_seed0/final.pt   # watch it
+```
+
+- **Actor:** one policy shared by all the drones. Each drone runs it on its own features, the last
+  `--frames` rows of its own observation plus its previous action, as in the single-drone tasks.
+  The slot one-hot in the row tells it which drone it is. Execution is decentralised: on the real
+  team every drone runs its own copy (`TeamPolicy` runs them together in sim).
+- **Critic:** centralised and used only in training. It sees every drone's features and, by default
+  (`--no-critic-state` turns it off), their privileged state, and predicts one value for the team
+  reward.
+- **Update:** as in the PPO baseline: GAE, clipped losses, a linearly annealed learning rate,
+  bootstrapping through time limits, and online observation and reward normalization. The team
+  advantage is shared by the drones, and each has its own probability ratio.
+
+The simulation is the bottleneck, so `--num-envs` environments (default 64) run in `--num-workers`
+processes (default: one per CPU thread). They pass observations through shared memory and reset
+themselves when an episode ends. The policy samples actions on the CPU, where one small batch per step
+is faster than a round trip to the GPU. Each update copies the rollout to `--device` once and runs
+there in large minibatches. `--device auto` (the default) picks the fastest GPU when PyTorch has CUDA
+support. The default install is CPU-only, so to update on the GPU, run with the CUDA 13.0 build:
+
+```sh
+uv run --no-group cpu --group cuda streampilot-train-formation formation-landing
+```
+
+This swaps the CUDA build of PyTorch into `.venv` (a multi-GB download the first time), and a plain
+`uv run` swaps the CPU build back. On the machine this was developed on (Ryzen 7 3700X, 8 cores, with
+other jobs using 5 of them), `formation-landing` trained at about 6,200 team steps/s (18,600 drone
+steps/s) with CPU updates and 7,000 with GPU updates. The simulation takes about 90% of that time, so
+the GPU helps less than more free cores would. The networks are small; the GPU matters more with
+larger `--hidden-size` or `--num-envs`.
+
+Runs go to `runs/mappo_TASK[_2d]_seedSEED/`. They log to the same Trackio project and have the same
+checkpoints as the other algorithms. Every update logs the episodes that ended in its rollout
+(return, success, collisions, out-of-bounds, formation error), the losses and the throughput.
+Every `--eval-every` steps (1M) a deterministic evaluation runs on fixed seeds. `--steps` counts
+team steps, summed over all environments.
+
 ## Layout
 
 - `src/streampilot/env/base.py`: `DroneBaseEnv` (scene, actions, camera, detection,
@@ -174,9 +232,11 @@ so 2M steps of SAC take roughly 4 h.
 - `src/streampilot/visualize.py`: viewer script and scripted controllers.
 - `src/streampilot/stream_x/`: Stream AC(λ) (`agents.py`, `optim.py`), observation history and
   normalization (`wrappers.py`).
-- `src/streampilot/baselines/`: PPO (`ppo.py`) and SAC (`sac.py`).
-- `src/streampilot/train.py`: training script for all algorithms (`--algo`);
-  `src/streampilot/policy.py`: deployable policy loaded from any checkpoint.
+- `src/streampilot/baselines/`: PPO (`ppo.py`), SAC (`sac.py`) and MAPPO (`mappo.py`).
+- `src/streampilot/train.py`: training script for all single-drone algorithms (`--algo`);
+  `src/streampilot/train_formation.py`: MAPPO training for the formation tasks;
+  `src/streampilot/vec_env.py`: the parallel environments it uses;
+  `src/streampilot/policy.py`: deployable policy loaded from any checkpoint (`TeamPolicy` for a team).
 - `src/streampilot/assets/skydio_x2/`: drone scene and mesh (Apache-2.0, see `LICENSE`).
 - `external/mujoco_drone_env`: the original prototype, kept for reference.
 

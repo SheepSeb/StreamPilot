@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 streampilot = "streampilot:main"
 streampilot-train = "streampilot.train:main"
+streampilot-train-formation = "streampilot.train_formation:main"
 
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13.0"]
@@ -26,12 +27,27 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
 ]
+cpu = ["torch>=2.14.0"]
+cuda = ["torch>=2.14.0"]
 
-# Streaming RL updates one sample at a time with small networks, so CPU torch is all we need.
+[tool.uv]
+default-groups = ["dev", "cpu"]
+conflicts = [[{ group = "cpu" }, { group = "cuda" }]]
+
+# Streaming RL updates one sample at a time with small networks, so CPU torch is the default
+# (group `cpu`). For MAPPO updates on the GPU, swap in the CUDA build: --no-group cpu --group cuda
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu" }]
+torch = [
+    { index = "pytorch-cpu", group = "cpu" },
+    { index = "pytorch-cu130", group = "cuda" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true

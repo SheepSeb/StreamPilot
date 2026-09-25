@@ -87,11 +87,12 @@ class FormationLandingEnv(FormationBaseEnv):
         """``(num_drones, 2)``: where each drone lands, the leader on the pad."""
         return self._pad_top[:2] + self.formation @ rotation(self._forward()).T
 
-    def _slots(self) -> np.ndarray:
-        return self.landing_spots() - self.handoff_distance * self._forward()
+    def _slots(self, spots=None) -> np.ndarray:
+        spots = self.landing_spots() if spots is None else spots
+        return spots - self.handoff_distance * self._forward()
 
-    def _slot_distances(self) -> np.ndarray:
-        return np.linalg.norm(self._slots() - self.drone_pos[:, :2], axis=1)
+    def _slot_distances(self, spots=None) -> np.ndarray:
+        return np.linalg.norm(self._slots(spots) - self.drone_pos[:, :2], axis=1)
 
     def _approach_error(self) -> np.ndarray:
         return self._slot_distances() + self.heading_weight * np.abs(self._heading_error(self._pad_top))
@@ -106,8 +107,9 @@ class FormationLandingEnv(FormationBaseEnv):
         self._prev_error = self._approach_error()
         self._held = 0
 
-    def _update_spots(self) -> None:
-        for marker, xy in zip(self._spot_markers, self.landing_spots()[1:]):
+    def _update_spots(self, spots=None) -> None:
+        spots = self.landing_spots() if spots is None else spots
+        for marker, xy in zip(self._spot_markers, spots[1:]):
             self.data.mocap_pos[marker] = [*xy, 0.002]
 
     def _task_target_geom(self, drone: int) -> int:
@@ -125,23 +127,35 @@ class FormationLandingEnv(FormationBaseEnv):
         )
 
     def _task_step(self):
-        self._update_spots()
-        error = self._approach_error()
+        # Everything below is evaluated at the same state: compute each term once.
+        spots = self.landing_spots()
+        self._update_spots(spots)
+        slot_distances = self._slot_distances(spots)
+        heading_error = np.abs(self._heading_error(self._pad_top))
+        pad_in_view = self._pad_in_view()
+        error = slot_distances + self.heading_weight * heading_error
         reward = self.progress_weight * float(np.mean(self._prev_error - error))
         self._prev_error = error
-        reward += self.view_reward * float(np.mean(self._pad_in_view()))
-        self._held = self._held + 1 if self._in_handoff_formation() else 0
+        reward += self.view_reward * float(np.mean(pad_in_view))
+        in_formation = bool(
+            np.all(slot_distances <= self.distance_tolerance)
+            and np.all(heading_error <= self.heading_tolerance)
+            and np.all(np.linalg.norm(self.drone_vel[:, :2], axis=1) <= self.max_handoff_speed)
+            and np.all(pad_in_view)
+        )
+        self._held = self._held + 1 if in_formation else 0
         success = self._held >= self.hold_steps
         if success:
             reward += self.handoff_bonus
-        return reward, success, self._task_info()
+        return reward, success, self._task_info(spots, slot_distances, heading_error)
 
-    def _task_info(self) -> dict:
+    def _task_info(self, spots=None, slot_distances=None, heading_error=None) -> dict:
+        spots = self.landing_spots() if spots is None else spots
         return {
             "distance": np.linalg.norm(self._pad_top[:2] - self.drone_pos[:, :2], axis=1),
-            "formation_error": self._slot_distances(),
-            "heading_error": np.abs(self._heading_error(self._pad_top)),
-            "handoff_offset": self._body_frame(self.landing_spots() - self.drone_pos[:, :2]),
+            "formation_error": self._slot_distances(spots) if slot_distances is None else slot_distances,
+            "heading_error": np.abs(self._heading_error(self._pad_top)) if heading_error is None else heading_error,
+            "handoff_offset": self._body_frame(spots - self.drone_pos[:, :2]),
             "is_success": self._held >= self.hold_steps,
         }
 

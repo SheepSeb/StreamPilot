@@ -5,6 +5,7 @@
     uv run streampilot tracking --camera overview --detection-noise 0.02
     uv run streampilot waypoint --policy runs/waypoint_seed0/final.pt   # trained policy
     uv run streampilot formation-landing --drones 2       # multi-drone formation tasks
+    uv run streampilot formation-landing --policy runs/mappo_formation-landing_seed0/final.pt
 
 The top-right inset is the onboard camera, with the detection the policy observes drawn in
 green (red frame: target not detected); formation tasks show one inset per drone, leader on the
@@ -216,13 +217,13 @@ def main() -> None:
     formation = args.task in FORMATION_TASKS
 
     trained = None
-    if formation and args.policy.endswith(".pt"):
-        parser.error("trained policies are not supported for the formation tasks yet")
     if args.policy.endswith(".pt"):
-        from streampilot.policy import Policy
+        from streampilot.policy import Policy, TeamPolicy
 
-        trained = Policy.load(args.policy)
+        trained = (TeamPolicy if formation else Policy).load(args.policy)
         assert trained.config["task"] == args.task, f"checkpoint is for {trained.config['task']}"
+        if formation:
+            args.drones = trained.num_drones
     elif args.policy not in ("scripted", "random", "zero"):
         parser.error(f"unknown policy {args.policy!r}")
     obs_mode = trained.config["obs_mode"] if trained else "detection"
