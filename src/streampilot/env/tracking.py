@@ -6,6 +6,19 @@ import numpy as np
 from streampilot.env.base import DroneBaseEnv
 
 
+def wander(rng, pos, vel, dt, max_speed, reversion, noise, limit):
+    """One step of a wandering floor target: Ornstein-Uhlenbeck velocity clipped to ``max_speed``,
+    bouncing off the walls of the square ``[-limit, limit]^2``. Returns the new ``(pos, vel)``."""
+    vel = vel * (1.0 - reversion * dt) + rng.normal(size=2) * noise * np.sqrt(dt)
+    speed = np.linalg.norm(vel)
+    if speed > max_speed:
+        vel *= max_speed / speed
+    pos = pos + vel * dt
+    bounced = np.abs(pos) > limit
+    vel[bounced] *= -1.0
+    return np.clip(pos, -limit, limit), vel
+
+
 class TrackingEnv(DroneBaseEnv):
     """The target (a red, person-sized pillar standing on the floor) is the detector target. It
     moves with an Ornstein-Uhlenbeck velocity and bounces off the walls of a square that leaves
@@ -75,19 +88,16 @@ class TrackingEnv(DroneBaseEnv):
         self._set_drone_state(start_xy, yaw)
 
     def _task_before_step(self) -> None:
-        # Ornstein-Uhlenbeck velocity in the floor plane, clipped to the maximum speed.
-        noise = self.np_random.normal(size=2) * self.target_speed_noise * np.sqrt(self.dt)
-        vel = self._target_vel[:2] * (1.0 - self.target_speed_reversion * self.dt) + noise
-        speed = np.linalg.norm(vel)
-        if speed > self.target_max_speed:
-            vel *= self.target_max_speed / speed
-
-        pos = self._target_pos[:2] + vel * self.dt
-        limit = self.target_half_extent
-        bounced = np.abs(pos) > limit
-        vel[bounced] *= -1.0
-        pos = np.clip(pos, -limit, limit)
-
+        pos, vel = wander(
+            self.np_random,
+            self._target_pos[:2],
+            self._target_vel[:2],
+            self.dt,
+            self.target_max_speed,
+            self.target_speed_reversion,
+            self.target_speed_noise,
+            self.target_half_extent,
+        )
         self._target_vel[:2] = vel
         self.data.mocap_pos[self._target][:2] = pos
 

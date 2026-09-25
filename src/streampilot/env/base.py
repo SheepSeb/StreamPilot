@@ -19,7 +19,116 @@ def wrap_angle(angle):
     return (angle + np.pi) % (2 * np.pi) - np.pi
 
 
-class DroneBaseEnv(gym.Env):
+def geom_corners(model, data, geom_id: int) -> np.ndarray:
+    """World-frame corners ``(8, 3)`` of ``geom_id``'s bounding box."""
+    center, half = model.geom_aabb[geom_id, :3], model.geom_aabb[geom_id, 3:]
+    signs = np.array(np.meshgrid([-1, 1], [-1, 1], [-1, 1])).reshape(3, -1).T
+    geom_mat = data.geom_xmat[geom_id].reshape(3, 3)
+    return data.geom_xpos[geom_id] + (center + signs * half) @ geom_mat.T
+
+
+def project_box(model, data, geom_id: int, cam_id: int, min_size: float) -> np.ndarray:
+    """Exact ``[visible, cx, cy, w, h]`` box of ``geom_id`` in camera ``cam_id`` (no occlusion)."""
+    return project_points(model, data, geom_corners(model, data, geom_id), cam_id, min_size)
+
+
+def project_points(model, data, corners, cam_id: int, min_size: float) -> np.ndarray:
+    """``[visible, cx, cy, w, h]`` box around world points ``corners`` in camera ``cam_id``."""
+    cam_mat = data.cam_xmat[cam_id].reshape(3, 3)
+    local = (corners - data.cam_xpos[cam_id]) @ cam_mat
+    local = local[local[:, 2] < -1e-3]  # corners in front of the camera
+    if len(local) == 0:
+        return np.zeros(5)
+    # Normalized image coordinates in [0, 1], origin top-left (camera x right, y up).
+    scale = 0.5 / np.tan(np.deg2rad(model.cam_fovy[cam_id]) / 2)
+    u = 0.5 + scale * local[:, 0] / -local[:, 2]
+    v = 0.5 - scale * local[:, 1] / -local[:, 2]
+    u0, u1 = np.clip([u.min(), u.max()], 0.0, 1.0)
+    v0, v1 = np.clip([v.min(), v.max()], 0.0, 1.0)
+    w, h = u1 - u0, v1 - v0
+    if min(w, h) < min_size:
+        return np.zeros(5)
+    return np.array([1.0, (u0 + u1) / 2, (v0 + v1) / 2, w, h])
+
+
+def point_in_view(model, data, cam_id: int, point) -> bool:
+    """Whether ``point`` (world frame) projects inside the (square) image of camera ``cam_id``."""
+    cam_mat = data.cam_xmat[cam_id].reshape(3, 3)
+    x, y, z = (np.asarray(point) - data.cam_xpos[cam_id]) @ cam_mat
+    limit = np.tan(np.deg2rad(model.cam_fovy[cam_id]) / 2) * -z
+    return bool(z < 0 and abs(x) <= limit and abs(y) <= limit)
+
+
+class SceneEnv(gym.Env):
+    """Model, rendering and viewer plumbing shared by the single- and multi-drone environments.
+    Subclasses call ``_init_scene`` from their constructor."""
+
+    metadata = {"render_modes": ["human", "rgb_array"]}
+
+    def _init_scene(self, model: mujoco.MjModel, frame_skip, image_size, render_mode, width, height, camera):
+        assert render_mode is None or render_mode in self.metadata["render_modes"]
+        self.model = model
+        self.data = mujoco.MjData(model)
+        self.frame_skip = frame_skip
+        self.image_size = image_size
+        self.render_mode = render_mode
+        self.width, self.height, self.camera = width, height, camera
+        self.metadata = {**self.metadata, "render_fps": int(np.round(1.0 / self.dt))}
+        self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
+        self._viewer = None
+        self._last_render_time: float | None = None
+
+    @property
+    def dt(self) -> float:
+        return self.model.opt.timestep * self.frame_skip
+
+    @property
+    def viewer_running(self) -> bool:
+        """False once the human-mode viewer window has been closed."""
+        return self._viewer is None or self._viewer.is_running()
+
+    def camera_image(self, camera: str | int = ONBOARD_CAMERA, width: int | None = None, height: int | None = None):
+        """Render ``camera`` (name, id, or -1 for the free camera) to an RGB array."""
+        size = (height or self.image_size, width or self.image_size)
+        if size not in self._renderers:
+            self._renderers[size] = mujoco.Renderer(self.model, *size)
+            # The first frame of a new GL context shades the floor texture slightly differently
+            # (a few intensity levels); discard it so identical states give identical images.
+            self._renderers[size].update_scene(self.data, camera=camera)
+            self._renderers[size].render()
+        renderer = self._renderers[size]
+        renderer.update_scene(self.data, camera=camera)
+        return renderer.render()
+
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return self.camera_image(-1 if self.camera is None else self.camera, self.width, self.height)
+        if self.render_mode == "human":
+            if self._viewer is None:
+                self._viewer = mujoco.viewer.launch_passive(self.model, self.data)
+                if self.camera is not None:
+                    self._viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+                    self._viewer.cam.fixedcamid = self.model.camera(self.camera).id
+            # Pace the passive viewer to real time.
+            if self._last_render_time is not None:
+                time.sleep(max(0.0, self.dt - (time.perf_counter() - self._last_render_time)))
+            self._last_render_time = time.perf_counter()
+            self._viewer.sync()
+        return None
+
+    def close(self):
+        for renderer in self._renderers.values():
+            renderer.close()
+        self._renderers.clear()
+        if self._viewer is not None:
+            self._viewer.close()
+            self._viewer = None
+
+    def _mocap_id(self, body_name: str) -> int:
+        return int(self.model.body_mocapid[self.model.body(body_name).id])
+
+
+class DroneBaseEnv(SceneEnv):
     """Drone flying at a fixed altitude in a bounded arena, commanded like a real drone's offboard
     velocity API with altitude hold.
 
@@ -46,8 +155,6 @@ class DroneBaseEnv(gym.Env):
     Episode length is limited by the ``TimeLimit`` wrapper added at registration.
     """
 
-    metadata = {"render_modes": ["human", "rgb_array"]}
-
     task_obs_dim = 0
 
     def __init__(
@@ -70,25 +177,19 @@ class DroneBaseEnv(gym.Env):
         camera: str | None = "chase",
     ):
         assert obs_mode in ("detection", "pixels", "state")
-        assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.obs_mode = obs_mode
-        self.image_size = image_size
         self.detection_noise = detection_noise
         self.detection_dropout = detection_dropout
         self.min_detection_size = min_detection_size
-        self.frame_skip = frame_skip
         self.flight_altitude = flight_altitude
         self.action_scale = np.array([max_speed, max_speed, max_yaw_rate])
         self.arena_half_extent = arena_half_extent
         self.ctrl_cost_weight = ctrl_cost_weight
         self.out_of_bounds_penalty = out_of_bounds_penalty
-        self.render_mode = render_mode
-        self.width, self.height, self.camera = width, height, camera
 
         spec = mujoco.MjSpec.from_file(str(SCENE_XML))
         self._build_scene(spec)
-        self.model = spec.compile()
-        self.data = mujoco.MjData(self.model)
+        self._init_scene(spec.compile(), frame_skip, image_size, render_mode, width, height, camera)
 
         slide_x, yaw = self.model.joint("slide_x"), self.model.joint("yaw")
         self._qpos_adr, self._qvel_adr = int(slide_x.qposadr[0]), int(slide_x.dofadr[0])
@@ -97,7 +198,6 @@ class DroneBaseEnv(gym.Env):
         self._onboard_cam_id = self.model.camera(ONBOARD_CAMERA).id
         self._half_fov = np.deg2rad(self.model.cam_fovy[self._onboard_cam_id]) / 2
 
-        self.metadata = {**self.metadata, "render_fps": int(np.round(1.0 / self.dt))}
         self.action_space = Box(-1.0, 1.0, shape=(3,), dtype=np.float32)
         if obs_mode == "detection":
             self.observation_space = Box(0.0, 1.0, shape=(5,), dtype=np.float32)
@@ -105,15 +205,7 @@ class DroneBaseEnv(gym.Env):
             self.observation_space = Box(0, 255, shape=(image_size, image_size, 3), dtype=np.uint8)
         else:
             self.observation_space = Box(-np.inf, np.inf, shape=(7 + self.task_obs_dim,), dtype=np.float32)
-
-        self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
-        self._viewer = None
-        self._last_render_time: float | None = None
         self.step_count = 0
-
-    @property
-    def dt(self) -> float:
-        return self.model.opt.timestep * self.frame_skip
 
     @property
     def drone_pos(self) -> np.ndarray:
@@ -130,11 +222,6 @@ class DroneBaseEnv(gym.Env):
     @property
     def drone_yaw_rate(self) -> float:
         return float(self.data.qvel[self._yaw_qvel_adr])
-
-    @property
-    def viewer_running(self) -> bool:
-        """False once the human-mode viewer window has been closed."""
-        return self._viewer is None or self._viewer.is_running()
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
@@ -168,41 +255,9 @@ class DroneBaseEnv(gym.Env):
             self.render()
         return self._get_obs(), reward, terminated, False, self._get_info(info)
 
-    def camera_image(self, camera: str | int = ONBOARD_CAMERA, width: int | None = None, height: int | None = None):
-        """Render ``camera`` (name, id, or -1 for the free camera) to an RGB array."""
-        size = (height or self.image_size, width or self.image_size)
-        if size not in self._renderers:
-            self._renderers[size] = mujoco.Renderer(self.model, *size)
-            # The first frame of a new GL context shades the floor texture slightly differently
-            # (a few intensity levels); discard it so identical states give identical images.
-            self._renderers[size].update_scene(self.data, camera=camera)
-            self._renderers[size].render()
-        renderer = self._renderers[size]
-        renderer.update_scene(self.data, camera=camera)
-        return renderer.render()
-
     def detect(self, geom_id: int) -> np.ndarray:
         """Exact ``[visible, cx, cy, w, h]`` box of ``geom_id`` in the onboard camera (no occlusion)."""
-        center, half = self.model.geom_aabb[geom_id, :3], self.model.geom_aabb[geom_id, 3:]
-        signs = np.array(np.meshgrid([-1, 1], [-1, 1], [-1, 1])).reshape(3, -1).T
-        geom_mat = self.data.geom_xmat[geom_id].reshape(3, 3)
-        corners = self.data.geom_xpos[geom_id] + (center + signs * half) @ geom_mat.T
-
-        cam_mat = self.data.cam_xmat[self._onboard_cam_id].reshape(3, 3)
-        local = (corners - self.data.cam_xpos[self._onboard_cam_id]) @ cam_mat
-        local = local[local[:, 2] < -1e-3]  # corners in front of the camera
-        if len(local) == 0:
-            return np.zeros(5)
-        # Normalized image coordinates in [0, 1], origin top-left (camera x right, y up).
-        scale = 0.5 / np.tan(self._half_fov)
-        u = 0.5 + scale * local[:, 0] / -local[:, 2]
-        v = 0.5 - scale * local[:, 1] / -local[:, 2]
-        u0, u1 = np.clip([u.min(), u.max()], 0.0, 1.0)
-        v0, v1 = np.clip([v.min(), v.max()], 0.0, 1.0)
-        w, h = u1 - u0, v1 - v0
-        if min(w, h) < self.min_detection_size:
-            return np.zeros(5)
-        return np.array([1.0, (u0 + u1) / 2, (v0 + v1) / 2, w, h])
+        return project_box(self.model, self.data, geom_id, self._onboard_cam_id, self.min_detection_size)
 
     def detection_obs(self) -> np.ndarray:
         """Detection of the task target as a noisy detector would report it."""
@@ -219,30 +274,6 @@ class DroneBaseEnv(gym.Env):
             [self.drone_pos[:2], self.drone_vel[:2], [np.cos(yaw), np.sin(yaw), self.drone_yaw_rate], self._task_obs()]
         ).astype(np.float32)
 
-    def render(self):
-        if self.render_mode == "rgb_array":
-            return self.camera_image(-1 if self.camera is None else self.camera, self.width, self.height)
-        if self.render_mode == "human":
-            if self._viewer is None:
-                self._viewer = mujoco.viewer.launch_passive(self.model, self.data)
-                if self.camera is not None:
-                    self._viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-                    self._viewer.cam.fixedcamid = self.model.camera(self.camera).id
-            # Pace the passive viewer to real time.
-            if self._last_render_time is not None:
-                time.sleep(max(0.0, self.dt - (time.perf_counter() - self._last_render_time)))
-            self._last_render_time = time.perf_counter()
-            self._viewer.sync()
-        return None
-
-    def close(self):
-        for renderer in self._renderers.values():
-            renderer.close()
-        self._renderers.clear()
-        if self._viewer is not None:
-            self._viewer.close()
-            self._viewer = None
-
     # --- helpers for subclasses -------------------------------------------------------
 
     def _set_drone_state(self, xy, yaw: float = 0.0) -> None:
@@ -256,9 +287,6 @@ class DroneBaseEnv(gym.Env):
     def _sample_yaw(self) -> float:
         return float(self.np_random.uniform(-np.pi, np.pi))
 
-    def _mocap_id(self, body_name: str) -> int:
-        return int(self.model.body_mocapid[self.model.body(body_name).id])
-
     def _drone_contacts(self, geom_id: int) -> bool:
         """Whether any drone geom is currently touching ``geom_id``."""
         g1, g2 = self.data.contact.geom1, self.data.contact.geom2  # length ncon
@@ -267,10 +295,7 @@ class DroneBaseEnv(gym.Env):
 
     def _point_in_view(self, point) -> bool:
         """Whether ``point`` (world frame) projects inside the onboard camera image."""
-        cam_mat = self.data.cam_xmat[self._onboard_cam_id].reshape(3, 3)
-        x, y, z = (np.asarray(point) - self.data.cam_xpos[self._onboard_cam_id]) @ cam_mat
-        limit = np.tan(self._half_fov) * -z  # square image: same FOV both ways
-        return bool(z < 0 and abs(x) <= limit and abs(y) <= limit)
+        return point_in_view(self.model, self.data, self._onboard_cam_id, point)
 
     def _heading_error(self, point) -> float:
         """Angle from the drone's nose to ``point`` in the horizontal plane."""

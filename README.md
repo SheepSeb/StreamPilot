@@ -60,6 +60,42 @@ env = gym.make("DroneLanding-v0", detection_noise=0.01, detection_dropout=0.05)
 obs, info = env.reset(seed=0)  # obs = [visible, cx, cy, w, h]
 ```
 
+## Formation tasks (multiple drones)
+
+Teams of 2 or 3 drones (`num_drones`, default 3) do the same three tasks together, in a formation:
+a column (one drone in front of the other) for two drones, an equilateral triangle with the leader
+(drone 0) at the apex for three. Slots are `formation_spacing` (1 m) apart.
+
+| ID                          | Task |
+| --------------------------- | ---- |
+| `DroneFormationWaypoint-v0` | Each stage shows one ball per drone (in the drone's colour, its detector target), laid out in the formation shape at a random position and rotation. The stage is complete when every drone is on its ball at the same time |
+| `DroneFormationLanding-v0`  | One pad. The drones land in the formation shape: the leader on the pad, the others on spots behind it. They hand off together, each 1.2 m in front of its landing spot, facing the pad with it in view (`info["handoff_offset"]`, one row per drone) |
+| `DroneFormationTracking-v0` | The leader follows the pillar at 1.5 m, the others hold their slots behind it, and all of them face the target |
+
+The formation frame points from the leader to the target, so the team can approach from any side.
+
+- **Action:** `(num_drones, 3)`, one body-frame `[vx, vy, yaw_rate]` row per drone.
+- **Observation:** one row per drone. In `"detection"` mode a row has the drone's own detection
+  `[visible, cx, cy, w, h]`, a one-hot of its slot, and its teammates' horizontal positions in its
+  body frame. A real team would share those positions over the radio. So one shared policy can
+  run on each row (decentralised), or one policy on all rows (centralised). `"pixels"` stacks the
+  onboard images; `"state"` stacks privileged state.
+- **Reward:** one team reward, the per-drone terms averaged. The episode ends, with a penalty,
+  when a drone leaves the arena or two drones come within `min_separation` (0.6 m).
+
+```python
+env = gym.make("DroneFormationLanding-v0", num_drones=2)
+obs, info = env.reset(seed=0)  # obs.shape == (2, 9)
+obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+```
+
+```sh
+uv run streampilot formation-waypoint                   # 3 drones, scripted controller, overview camera
+uv run streampilot formation-landing --drones 2
+```
+
+`streampilot-train` does not support the formation tasks yet.
+
 ## Watching the tasks
 
 ```sh
@@ -133,6 +169,8 @@ so 2M steps of SAC take roughly 4 h.
   rendering). Tasks override `_build_scene` (add bodies through `mujoco.MjSpec`),
   `_task_reset`, `_task_before_step`, `_task_target_geom`, `_task_obs`, `_task_step` and `_task_info`.
 - `src/streampilot/env/{waypoint,landing,tracking}.py`: the three tasks.
+- `src/streampilot/env/formation/`: the multi-drone versions. `FormationBaseEnv` puts N copies of
+  the drone into one scene; `formation_offsets` defines the shapes.
 - `src/streampilot/visualize.py`: viewer script and scripted controllers.
 - `src/streampilot/stream_x/`: Stream AC(λ) (`agents.py`, `optim.py`), observation history and
   normalization (`wrappers.py`).
