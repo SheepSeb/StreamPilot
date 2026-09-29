@@ -18,6 +18,8 @@ dependencies = [
 streampilot = "streampilot:main"
 streampilot-train = "streampilot.train:main"
 streampilot-train-formation = "streampilot.train_formation:main"
+streampilot-train-formation-stream = "streampilot.train_formation_stream:main"
+streampilot-eval-controllers = "streampilot.eval_controllers:main"
 
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13.0"]

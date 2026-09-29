@@ -10,7 +10,7 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 from pathlib import Path
 
 import gymnasium as gym
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import streampilot.env  # noqa: F401
 from streampilot.visualize import FORMATION_POLICIES, SCRIPTED_POLICIES, draw_detection
@@ -29,7 +29,7 @@ ONBOARD_STILL_SIZE = 320
 FRAME_STRIDE = 2  # env steps at 20 Hz; keep every other frame -> 10 fps, smaller file
 
 
-def render_task(name: str, env_id: str, seed: int = 0, max_steps: int = 200):
+def render_task(name: str, env_id: str, seed: int = 0, max_steps: int = 200, label=None, **env_kwargs):
     env = gym.make(
         env_id,
         obs_mode="detection",
@@ -37,6 +37,7 @@ def render_task(name: str, env_id: str, seed: int = 0, max_steps: int = 200):
         camera="chase",
         width=RENDER_SIZE,
         height=RENDER_SIZE,
+        **env_kwargs,
     )
     base = env.unwrapped
     obs, _ = env.reset(seed=seed)
@@ -54,7 +55,10 @@ def render_task(name: str, env_id: str, seed: int = 0, max_steps: int = 200):
         inset = draw_detection(base.camera_image(width=INSET, height=INSET), obs)
         pad = 6
         frame[pad : pad + INSET, -pad - INSET : -pad if pad else None] = inset
-        frames.append(Image.fromarray(frame))
+        image = Image.fromarray(frame)
+        if label is not None:
+            ImageDraw.Draw(image).text((pad, pad), label(info), fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0))
+        frames.append(image)
 
         # Track the best-framed onboard view (detection box closest to target_area) as a still,
         # so the README can show exactly what the detector sees.
@@ -121,6 +125,16 @@ if __name__ == "__main__":
         save_gif(frames, OUT / f"{name}.gif")
         onboard_still.save(OUT / f"{name}_onboard.png")
         print(f"wrote {OUT / f'{name}_onboard.png'}")
+
+    # Switch more often than the default 4-8 s so one short GIF shows several shapes and motions.
+    frames, _ = render_task(
+        "morphing",
+        "DroneMorphingTracking-v0",
+        max_steps=300,
+        switch_steps=(50, 70),
+        label=lambda info: f"{info['shape']} / {info['motion']}",
+    )
+    save_gif(frames, OUT / "morphing.gif")
 
     for name, env_id in FORMATION_TASKS.items():
         frames = render_formation_task(name, env_id)

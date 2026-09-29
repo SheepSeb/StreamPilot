@@ -35,12 +35,16 @@ flies by onboard vision.
 | `DroneWaypoint-v0` | Reach a sequence of waypoints at flight altitude; only the current one is shown | green ball |
 | `DroneLanding-v0`  | Landing approach at 0.6 m: hover 1.2 m from the pad, facing it with the pad in view, then hand off (`info["handoff_offset"]`) to the flight controller's own landing | orange pad |
 | `DroneTracking-v0` | Stay 1.5 m (horizontally) from a wandering person-sized pillar, facing it | red pillar |
+| `DroneMorphingTracking-v0` | Tracking, but every 4-8 s the target switches shape (pillar, cylinder, crate, floating ball) and motion (wander, circle, straight line, stop); `info` has `shape`, `motion`, `switched` | red shape |
 
 <table>
 <tr>
 <td align="center"><img src="docs/media/waypoint.gif" width="260"><br><code>DroneWaypoint-v0</code></td>
 <td align="center"><img src="docs/media/landing.gif" width="260"><br><code>DroneLanding-v0</code></td>
 <td align="center"><img src="docs/media/tracking.gif" width="260"><br><code>DroneTracking-v0</code></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/media/morphing.gif" width="260"><br><code>DroneMorphingTracking-v0</code><br>(switching every ~3 s here)</td>
 </tr>
 </table>
 
@@ -105,14 +109,15 @@ uv run streampilot formation-waypoint                   # 3 drones, scripted con
 uv run streampilot formation-landing --drones 2
 ```
 
-To train them, use `streampilot-train-formation` ([MAPPO](#training-the-formation-tasks-with-mappo)).
+To train them, use `streampilot-train-formation` ([MAPPO](#training-the-formation-tasks-with-mappo)) or
+`streampilot-train-formation-stream` ([independent Stream AC](#training-the-formation-tasks-with-independent-stream-ac)).
 
 ## Watching the tasks
 
 ```sh
 uv run streampilot landing                        # scripted controller in the viewer
 uv run streampilot tracking --policy random --camera overview
-# --policy scripted|random|zero  --camera chase|overview|onboard|free
+# --policy scripted|pid|mpc|random|zero  --camera chase|overview|onboard|free
 # --detection-noise F  --detection-dropout P  --episodes N  --seed S
 ```
 
@@ -151,6 +156,24 @@ from streampilot.policy import Policy
 policy = Policy.load("runs/waypoint_seed0/final.pt")
 policy.reset()
 action = policy(detection)  # [visible, cx, cy, w, h] -> [vx, vy, yaw_rate] in [-1, 1]
+```
+
+## Classical baselines (PID, MPC)
+
+`streampilot.control` has a PID and a linear MPC that fly every task (single drone and formations)
+without learning. The drone is a velocity-commanded point mass with a ~0.2 s lag, so both track a
+goal position plus feedforward velocity from task guidance (waypoint, hand-off point, follow point,
+formation slots): the PID as `Kp e + Ki ∫e − Kd v`, the MPC as a 20-step (1 s) receding-horizon
+QP with a speed limit, solved with projected gradient in numpy. Formation drones add the same
+velocity-level collision avoidance as the scripted policy, and all controllers cap speed at 1 m/s.
+
+They read privileged state (`state_obs()`), not the detection, so they are the reference for what
+perfect state estimation buys, not vision policies. Watch them with
+`uv run streampilot tracking --policy mpc`, and compare with the scripted policy on fixed seeds:
+
+```sh
+uv run streampilot-eval-controllers                      # all tasks, scripted / pid / mpc
+uv run streampilot-eval-controllers waypoint --controllers pid mpc --episodes 50
 ```
 
 ## Non-streaming baselines
@@ -221,6 +244,61 @@ checkpoints as the other algorithms. Every update logs the episodes that ended i
 Every `--eval-every` steps (1M) a deterministic evaluation runs on fixed seeds. `--steps` counts
 team steps, summed over all environments.
 
+## Training the formation tasks with independent Stream AC
+
+`streampilot-train-formation-stream` is the streaming baseline for the formation tasks: every drone
+runs its own Stream AC(λ) learner, and the learners are fully decentralised.
+
+```sh
+uv run streampilot-train-formation-stream formation-waypoint             # 3 drones, 2M team steps
+uv run streampilot-train-formation-stream formation-landing --drones 2
+uv run streampilot-train-formation-stream formation-tracking --help      # all options
+uv run streampilot formation-landing --policy runs/istream_ac_formation-landing_seed0/final.pt
+```
+
+- **Per drone:** its own actor, critic and ObGD traces, with no parameter sharing. The critic sees
+  only that drone's features, the same ones as its actor, so training is decentralised as well as
+  execution. The features are the last `--frames` rows of the drone's own observation plus its
+  previous action, standardized with the drone's own running statistics.
+- **Reward:** every learner gets the team reward and scales it with its own running statistics.
+  Each learner treats its teammates as part of the environment.
+- **Loop:** as in `streampilot-train`: one environment, and on every team step each drone learns
+  from its own transition once, as it arrives. The same loop could run on each drone of a real team.
+
+Runs go to `runs/istream_ac_TASK[_2d]_seedSEED/` and log the same episode metrics as MAPPO, plus
+each drone's TD error, to the task's Trackio group. The checkpoint holds one actor and one set of
+normalization statistics per drone, and `TeamPolicy` loads it.
+
+For speed, the drones' networks are stacked into batched weights and updated together, with one
+forward, backward and ObGD step per team step. The step-size bound is still computed per drone,
+so this matches separate learners exactly (a test checks it). A single-sample update is almost
+all PyTorch overhead, so this runs at about 500 team steps/s on one core with 2 or 3 drones,
+about twice as fast as updating the drones one after another. The updates are still ~80% of the
+time; the simulation is ~15%.
+
+### Centralised critic (CTDE)
+
+`--critic centralized` trains the same per-drone actors against one shared critic
+(`CentralizedStreamAC`): centralised training, decentralised execution.
+
+```sh
+uv run streampilot-train-formation-stream formation-waypoint --critic centralized
+```
+
+- **Critic:** one `V(s)` of the joint observation (every drone's normalized features,
+  concatenated), with its own eligibility trace and ObGD step, updated with the team TD error.
+  The team reward is scaled with one set of running statistics.
+- **Actors:** one per drone, each seeing only its own features, with its own trace and ObGD
+  step-size bound. By default, each one updates with the shared team TD error.
+  `observe(..., advantages=...)` swaps in a per-drone advantage estimate for the actors only.
+- **Deployment:** the same as independent Stream AC. The critic is needed only for training, so
+  each drone still runs its own actor on its own observation row, and `TeamPolicy` loads the
+  checkpoint. The checkpoint also stores the shared critic under `critic`.
+
+Runs go to `runs/cstream_ac_TASK[_2d]_seedSEED/` and log the team TD error as
+`train/abs_td_error`. A test checks that the batched version matches one plain `Critic` plus
+one plain `Actor` per drone, each with its own `ObGD`, step for step.
+
 ## Layout
 
 - `src/streampilot/env/base.py`: `DroneBaseEnv` (scene, actions, camera, detection,
@@ -230,11 +308,13 @@ team steps, summed over all environments.
 - `src/streampilot/env/formation/`: the multi-drone versions. `FormationBaseEnv` puts N copies of
   the drone into one scene; `formation_offsets` defines the shapes.
 - `src/streampilot/visualize.py`: viewer script and scripted controllers.
+- `src/streampilot/control.py`, `eval_controllers.py`: PID and MPC baselines, and their evaluation.
 - `src/streampilot/stream_x/`: Stream AC(λ) (`agents.py`, `optim.py`), observation history and
-  normalization (`wrappers.py`).
+  normalization (`wrappers.py`), and independent per-drone learners for the formation tasks (`multi_agent.py`).
 - `src/streampilot/baselines/`: PPO (`ppo.py`), SAC (`sac.py`) and MAPPO (`mappo.py`).
 - `src/streampilot/train.py`: training script for all single-drone algorithms (`--algo`);
   `src/streampilot/train_formation.py`: MAPPO training for the formation tasks;
+  `src/streampilot/train_formation_stream.py`: independent and centralised-critic Stream AC training for them;
   `src/streampilot/vec_env.py`: the parallel environments it uses;
   `src/streampilot/policy.py`: deployable policy loaded from any checkpoint (`TeamPolicy` for a team).
 - `src/streampilot/assets/skydio_x2/`: drone scene and mesh (Apache-2.0, see `LICENSE`).

@@ -1,4 +1,5 @@
-"""Run a trained policy (Stream AC, PPO or SAC) from raw environment (or real detector) observations."""
+"""Run a trained policy (Stream AC, PPO, SAC, MAPPO, independent or centralised-critic Stream AC)
+from raw environment (or real detector) observations."""
 
 from pathlib import Path
 
@@ -9,7 +10,14 @@ from streampilot.baselines import mappo, ppo, sac
 from streampilot.stream_x import agents as stream_ac
 from streampilot.stream_x.wrappers import ObservationHistory
 
-ACTORS = {"stream_ac": stream_ac.Actor, "ppo": ppo.Actor, "sac": sac.Actor, "mappo": mappo.Actor}
+ACTORS = {
+    "stream_ac": stream_ac.Actor,
+    "ppo": ppo.Actor,
+    "sac": sac.Actor,
+    "mappo": mappo.Actor,
+    "istream_ac": stream_ac.Actor,
+    "cstream_ac": stream_ac.Actor,
+}
 
 
 class Policy:
@@ -53,9 +61,10 @@ class Policy:
 
 
 class TeamPolicy:
-    """A formation-task checkpoint (MAPPO) run on a whole team: one ``Policy`` per drone, each with
-    its own observation history, sharing the actor. On the real team each drone runs its own
-    ``Policy`` on its own observation row::
+    """A formation-task checkpoint run on a whole team: one ``Policy`` per drone, each with its own
+    observation history. With MAPPO the drones share the actor and its normalization; with
+    independent or centralised-critic Stream AC (``checkpoint["drones"]``) each drone has its own.
+    On the real team each drone runs its own ``Policy`` on its own observation row::
 
         policy = TeamPolicy.load("runs/mappo_formation-landing_seed0/final.pt")
         policy.reset()
@@ -65,7 +74,8 @@ class TeamPolicy:
     def __init__(self, checkpoint: dict):
         self.config = checkpoint["config"]
         self.num_drones = self.config["env_kwargs"]["num_drones"]
-        self.drones = [Policy(checkpoint) for _ in range(self.num_drones)]
+        per_drone = checkpoint.get("drones") or [{}] * self.num_drones
+        self.drones = [Policy({**checkpoint, **drone}) for drone in per_drone]
 
     @classmethod
     def load(cls, path: str | Path) -> "TeamPolicy":

@@ -11,5 +11,8 @@ wheels/
 
 # Tests
 .pytest_cache/
+.ruff_cache/
+.claude/
+
 # Training runs
 runs/

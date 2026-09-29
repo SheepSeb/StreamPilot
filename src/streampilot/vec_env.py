@@ -55,7 +55,7 @@ def _single_threaded_children():
                 os.environ[k] = v
 
 
-def _episode_summary(info: dict, ret: float, length: int) -> dict:
+def episode_summary(info: dict, ret: float, length: int) -> dict:
     summary = {"return": ret, "length": length}
     for key in EPISODE_INFO:
         if key in info:
@@ -93,7 +93,7 @@ def _worker(pipe, env_id: str, env_kwargs: dict, indices: range, buffers: dict, 
                     if te or tr:
                         final_obs[i] = o
                         write_state(i, env, "final_state")
-                        episodes.append((i, _episode_summary(info, float(returns[k]), int(lengths[k]))))
+                        episodes.append((i, episode_summary(info, float(returns[k]), int(lengths[k]))))
                         returns[k], lengths[k] = 0.0, 0
                         o, _ = env.reset()
                     obs[i] = o

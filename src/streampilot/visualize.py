@@ -1,6 +1,7 @@
 """Watch the drone tasks in the MuJoCo viewer.
 
     uv run streampilot waypoint                  # scripted controller
+    uv run streampilot tracking --policy mpc     # classical baselines: pid, mpc
     uv run streampilot landing --policy random
     uv run streampilot tracking --camera overview --detection-noise 0.02
     uv run streampilot waypoint --policy runs/waypoint_seed0/final.pt   # trained policy
@@ -21,10 +22,16 @@ import mujoco
 import numpy as np
 
 import streampilot.env  # noqa: F401  (registers the environments)
+from streampilot.control import ControllerPolicy, body_action
 from streampilot.env.base import wrap_angle
 from streampilot.env.formation.base import unit
 
-TASKS = {"waypoint": "DroneWaypoint-v0", "landing": "DroneLanding-v0", "tracking": "DroneTracking-v0"}
+TASKS = {
+    "waypoint": "DroneWaypoint-v0",
+    "landing": "DroneLanding-v0",
+    "tracking": "DroneTracking-v0",
+    "morphing": "DroneMorphingTracking-v0",
+}
 FORMATION_TASKS = {
     "formation-waypoint": "DroneFormationWaypoint-v0",
     "formation-landing": "DroneFormationLanding-v0",
@@ -35,15 +42,6 @@ FORMATION_INSET_SIZE = 180
 
 # Scripted controllers. They cheat: they read the privileged state from ``env.state_obs()``
 # (x, y 0:2, vx, vy 2:4, cos/sin yaw 4:6, yaw rate 6, task obs 7:), not the detection.
-
-
-def body_action(env, state, world_vel, desired_yaw) -> np.ndarray:
-    """Normalized ``[vx, vy, yaw_rate]`` body-frame action for a horizontal world-frame velocity."""
-    yaw = np.arctan2(state[5], state[4])
-    c, s = np.cos(yaw), np.sin(yaw)
-    vx, vy = world_vel
-    yaw_rate = 2.0 * wrap_angle(desired_yaw - yaw)
-    return np.clip(np.array([c * vx + s * vy, -s * vx + c * vy, yaw_rate]) / env.action_scale, -1.0, 1.0)
 
 
 def waypoint_policy(env, state) -> np.ndarray:
@@ -129,7 +127,12 @@ class _Goals:
         return getattr(self._env, name)
 
 
-SCRIPTED_POLICIES = {"waypoint": waypoint_policy, "landing": landing_policy, "tracking": tracking_policy}
+SCRIPTED_POLICIES = {
+    "waypoint": waypoint_policy,
+    "landing": landing_policy,
+    "tracking": tracking_policy,
+    "morphing": tracking_policy,
+}
 FORMATION_POLICIES = {
     "formation-waypoint": formation_policy,
     "formation-landing": formation_landing_policy,
@@ -181,8 +184,9 @@ def show_onboard(env, detections: np.ndarray, reward: float, total: float) -> No
     insets = []
     for k, (image, detection) in enumerate(zip(images, detections)):
         size = image.shape[0]
-        # Along the top edge, right-aligned, leader on the left.
-        rect = mujoco.MjrRect(vp.width - (size + 10) * (len(images) - k), vp.height - size - 10, size, size)
+        # Along the top edge, centred, leader on the left.
+        left = vp.left + (vp.width - (size + 10) * len(images) + 10) // 2
+        rect = mujoco.MjrRect(left + (size + 10) * k, vp.bottom + vp.height - size - 10, size, size)
         teammates = base.detect_teammates(k) if detections.shape[0] > 1 else ()
         insets.append((rect, draw_detection(image, detection, teammates)))
     viewer.set_images(insets)
@@ -203,7 +207,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Watch the drone tasks in the MuJoCo viewer.")
     parser.add_argument("task", choices=[*TASKS, *FORMATION_TASKS])
     parser.add_argument(
-        "--policy", default="scripted", help="scripted, random, zero, or a training checkpoint (.pt)"
+        "--policy", default="scripted", help="scripted, pid, mpc, random, zero, or a training checkpoint (.pt)"
     )
     parser.add_argument(
         "--camera", choices=["chase", "overview", "onboard", "free"], help="default: chase, overview for formations"
@@ -224,7 +228,7 @@ def main() -> None:
         assert trained.config["task"] == args.task, f"checkpoint is for {trained.config['task']}"
         if formation:
             args.drones = trained.num_drones
-    elif args.policy not in ("scripted", "random", "zero"):
+    elif args.policy not in ("scripted", "pid", "mpc", "random", "zero"):
         parser.error(f"unknown policy {args.policy!r}")
     obs_mode = trained.config["obs_mode"] if trained else "detection"
 
@@ -249,6 +253,9 @@ def main() -> None:
         "random": lambda obs: env.action_space.sample(),
         "zero": lambda obs: np.zeros(env.action_space.shape),
     }
+    if args.policy in ("pid", "mpc"):
+        controller = ControllerPolicy(args.policy)
+        policies[args.policy] = lambda obs: controller(base)
     policy = trained or policies[args.policy]
     env.action_space.seed(args.seed)
 
@@ -257,6 +264,8 @@ def main() -> None:
         obs, _ = env.reset(seed=args.seed + episode)
         if trained:
             trained.reset()
+        elif args.policy in ("pid", "mpc"):
+            controller.reset(base)
         total, done = 0.0, False
         while not done and base.viewer_running:
             obs, reward, terminated, truncated, info = env.step(policy(obs))

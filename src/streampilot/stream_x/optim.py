@@ -33,3 +33,33 @@ class ObGD(torch.optim.Optimizer):
             torch._foreach_add_(params, traces, alpha=-step_size * delta)
             if reset:
                 torch._foreach_zero_(traces)
+
+
+class BatchedObGD(torch.optim.Optimizer):
+    """``ObGD`` for ``n`` independent learners whose parameters are stacked along dim 0 (learner
+    ``i`` owns ``p[i]`` of every parameter). Each learner has its own trace, TD error and step-size
+    bound, so ``step`` does exactly what ``n`` separate ``ObGD`` optimizers would."""
+
+    def __init__(self, params, lr: float = 1.0, gamma: float = 0.99, lamda: float = 0.8, kappa: float = 2.0):
+        super().__init__(params, dict(lr=lr, gamma=gamma, lamda=lamda, kappa=kappa))
+
+    @torch.no_grad()
+    def step(self, delta: torch.Tensor, reset: bool = False) -> None:
+        """``delta``: ``(n,)``, one TD error per learner."""
+        for group in self.param_groups:
+            params = group["params"]
+            for p in params:
+                if not self.state[p]:
+                    self.state[p]["trace"] = torch.zeros_like(p)
+            traces = [self.state[p]["trace"] for p in params]
+            torch._foreach_mul_(traces, group["gamma"] * group["lamda"])
+            torch._foreach_add_(traces, [p.grad for p in params])
+            z_sum = sum(t.abs().flatten(1).sum(1) for t in traces)  # (n,): each learner's ||z||_1
+
+            bound = group["lr"] * group["kappa"] * delta.abs().clamp(min=1.0) * z_sum
+            step_size = torch.where(bound > 1.0, group["lr"] / bound, torch.full_like(bound, group["lr"]))
+            scale = -step_size * delta
+            for p, t in zip(params, traces):
+                p.add_(t * scale.view(-1, *[1] * (p.dim() - 1)))
+            if reset:
+                torch._foreach_zero_(traces)
