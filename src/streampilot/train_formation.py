@@ -199,6 +199,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--detection-noise", type=float, default=0.0)
     parser.add_argument("--detection-dropout", type=float, default=0.0)
     parser.add_argument(
+        "--curriculum-fraction",
+        type=float,
+        default=0.0,
+        help="ramp the detection dropout and noise linearly from 0 to --detection-dropout/--detection-noise "
+        "over this fraction of the steps, then hold them (0: no curriculum, the full levels from the start). "
+        "Evaluations always use the full levels",
+    )
+    parser.add_argument(
         "--critic-state",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -242,6 +250,7 @@ def main() -> None:
         "hidden_size": args.hidden_size,
         "gamma": args.gamma,
         "critic_state": args.critic_state,
+        "curriculum_fraction": args.curriculum_fraction,
     }
     venv = FormationVecEnv(TASKS[args.task], env_kwargs, args.num_envs, args.num_workers, args.critic_state)
     team = Team(venv, args.frames, args.critic_state, independent=args.algo == "ippo")
@@ -275,8 +284,13 @@ def main() -> None:
     sample_time = update_time = eval_time = 0.0
     next_eval = args.eval_every
 
+    full_levels = (args.detection_dropout, args.detection_noise) if args.obs_mode == "detection" else None
+    ramp = args.curriculum_fraction * args.steps if full_levels else 0.0
     for update in range(1, num_updates + 1):
         t0 = time.perf_counter()
+        if ramp > 0:  # the curriculum: the detection degrades from clean to the full levels
+            scale = min(step / ramp, 1.0)
+            venv.set_detection(*(scale * level for level in full_levels))
         for _ in range(args.rollout_steps):
             actions = agent.act(actor_x)
             obs, reward, terminated, truncated, ended = venv.step(actions)
@@ -302,6 +316,8 @@ def main() -> None:
         log = {f"train/{k}": v for k, v in metrics.items()}
         log |= summarize(episodes, "episode")
         log["episode/count"] = len(episodes)
+        if ramp > 0:
+            log["train/curriculum_scale"] = scale
         log["train/steps_per_sec"] = step / (t2 - start)
         log["train/sample_steps_per_sec"] = batch / (t1 - t0)
         log["train/update_seconds"] = t2 - t1
@@ -321,6 +337,8 @@ def main() -> None:
         if step >= next_eval and update < num_updates:
             next_eval += args.eval_every
             save_checkpoint(out / "latest.pt", config, agent, team)
+            if ramp > 0:
+                venv.set_detection(*full_levels)
             result = evaluate(venv, agent, team, args.eval_episodes, seed=10_000)
             logger.log(result | compute, step)
             logger.flush()
@@ -329,6 +347,8 @@ def main() -> None:
             running_return[:] = 0.0
 
     save_checkpoint(out / "final.pt", config, agent, team)
+    if ramp > 0:
+        venv.set_detection(*full_levels)
     result = evaluate(venv, agent, team, args.final_eval_episodes, seed=10_000)
     logger.log(result | compute, step)
     logger.flush()

@@ -154,6 +154,32 @@ class _StreamTeam:
         dist = self._policy(torch.as_tensor(self.features))
         return (dist.mean if deterministic else dist.sample()).numpy()
 
+    def new_task(self) -> None:
+        """Carry on to another task: weights and observation statistics are kept, the reward scale
+        (of the old task's returns) and every eligibility trace start over."""
+        self.return_stats = RunningMeanStd(self.return_stats.mean.shape)
+        self._return[:] = 0.0
+        for optim in (self.actor_optim, self.critic_optim):
+            for group in optim.param_groups:
+                if "_trace" in group:
+                    group["_trace"].zero_()
+            for state in optim.state.values():
+                state["trace"].zero_()
+
+    @torch.no_grad()
+    def reset_drone(self, i: int) -> None:
+        """Swap drone ``i`` for a fresh learner: new actor and critic weights and traces. The
+        observation statistics stay (they describe the drone's sensor, not its network)."""
+        nets = [self.actor] + ([self.critic] if isinstance(self.critic_optim, BatchedObGD) else [])
+        for net in nets:
+            for layer in [*net.hidden, *net.heads]:
+                sparse_init_(layer.weight[i])
+                layer.bias[i].zero_()
+        for optim in (self.actor_optim, self.critic_optim):
+            for group in optim.param_groups:
+                if "_trace" in group:
+                    group["_trace"][i].zero_()
+
     def _drone_state_dict(self, i: int) -> dict:
         s = self.obs_stats
         return {

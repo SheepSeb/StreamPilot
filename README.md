@@ -304,6 +304,21 @@ Runs go to `runs/cstream_ac_TASK[_2d]_seedSEED/` and log the team TD error as
 `train/abs_td_error`. A test checks that the batched version matches one plain `Critic` plus
 one plain `Actor` per drone, each with its own `ObGD`, step for step.
 
+## Task sequence: adaptation and forgetting (E2.1)
+
+One team trains on tracking, then waypoint, then landing, then tracking again (`--steps-per-task` K team
+steps each). Conditions: StreamX continuing to learn, StreamX frozen after the first phase (scored inside the
+continuing run), StreamX from scratch on each task, and MAPPO/IPPO fine-tuned (plus a from-scratch MAPPO as the
+reference for its own transfer). Success rate, time to complete, accuracy, forward transfer (area under the curve
+against scratch), backward transfer (tracking before vs after) and steps to recover after a task change or a
+swapped drone (`--swap-phase`, Stream AC only) are in `streampilot.continual`'s docstring.
+
+```bash
+uv run python scripts/compare_continual.py train --steps 1000000 --seeds 1 2 3   # or one run: uv run streampilot-continual --help
+uv run python scripts/compare_continual.py report
+uv run python scripts/compare_continual.py plot
+```
+
 ## Layout
 
 - `src/streampilot/env/base.py`: `DroneBaseEnv` (scene, actions, camera, detection,

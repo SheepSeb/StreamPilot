@@ -108,6 +108,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frames", type=int, default=4, help="observations stacked into each drone's input")
     parser.add_argument("--detection-noise", type=float, default=0.0)
     parser.add_argument("--detection-dropout", type=float, default=0.0)
+    parser.add_argument(
+        "--curriculum-fraction",
+        type=float,
+        default=0.0,
+        help="ramp the detection dropout and noise linearly from 0 to --detection-dropout/--detection-noise "
+        "over this fraction of the steps, then hold them (0: no curriculum, the full levels from the start). "
+        "Evaluations always use the full levels",
+    )
     parser.add_argument("--out", type=Path, default=None, help="default: runs/ALGO_TASK[_Nd]_seedSEED (ALGO: istream_ac or cstream_ac)")
     parser.add_argument("--project", default="streampilot", help="Trackio project")
     parser.add_argument("--log-every", type=int, default=50, help="episodes between progress lines")
@@ -139,6 +147,7 @@ def main() -> None:
         "num_frames": args.frames,
         "hidden_size": args.hidden_size,
         "gamma": args.gamma,
+        "curriculum_fraction": args.curriculum_fraction,
     }
     env = make_env(config)
     obs_dim, action_dim = int(np.prod(env.observation_space.shape[1:])), env.action_space.shape[1]
@@ -170,9 +179,14 @@ def main() -> None:
         # Cumulative at the current step, for a compute axis next to the team steps; evaluation time excluded.
         return {"train/grad_updates": step * team.updates_per_step, "train/wall_seconds": now - start - eval_seconds}
 
+    ramp = args.curriculum_fraction * args.steps
     obs, _ = env.reset(seed=args.seed)
     team.reset(obs)
     for step in range(1, args.steps + 1):
+        if ramp > 0:  # the curriculum: the detection degrades from clean to the full levels
+            scale = min(step / ramp, 1.0)
+            env.unwrapped.detection_dropout = scale * args.detection_dropout
+            env.unwrapped.detection_noise = scale * args.detection_noise
         actions = team.act()
         obs, reward, terminated, truncated, info = env.step(actions)
         done = terminated or truncated
@@ -198,6 +212,8 @@ def main() -> None:
                     suffix = "" if per_step.shape[1] == 1 else f"_d{i}"
                     metrics[f"train/{name}_step_scale{suffix}"] = float(mean)
                     metrics[f"train/{name}_bound_active{suffix}"] = float(active)
+            if ramp > 0:
+                metrics["train/curriculum_scale"] = scale
             logger.log(metrics, step)
             recent.append(summary)
             abs_td.clear()

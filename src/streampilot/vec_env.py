@@ -126,6 +126,10 @@ def _worker(pipe, env_id: str, env_kwargs: dict, indices: range, buffers: dict, 
                     write_state(i, env)
                 returns[:], lengths[:] = 0.0, 0
                 pipe.send(None)
+            elif cmd == "detection":  # arg: (dropout, noise) for every environment of this worker
+                for env in envs:
+                    env.unwrapped.detection_dropout, env.unwrapped.detection_noise = arg
+                pipe.send(None)
             elif cmd == "close":
                 break
     except KeyboardInterrupt:
@@ -219,6 +223,13 @@ class FormationVecEnv:
         for pipe in self._pipes:
             episodes.extend(pipe.recv())
         return self.obs, self.reward, self.terminated, self.truncated, episodes
+
+    def set_detection(self, dropout: float, noise: float) -> None:
+        """Set the detection dropout and noise of every environment, from its next step on."""
+        for pipe in self._pipes:
+            pipe.send(("detection", (dropout, noise)))
+        for pipe in self._pipes:
+            pipe.recv()
 
     def close(self) -> None:
         if self._closed:

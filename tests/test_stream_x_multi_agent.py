@@ -255,3 +255,19 @@ def test_centralized_checkpoint_team_policy_matches_learners(tmp_path):
         np.testing.assert_allclose(action, expected, atol=1e-5)
         obs, *_ = env.step(action)
         features = np.stack([h.push(a, row) for h, a, row in zip(team.histories, action, obs)])
+
+
+def test_reset_drone_and_new_task():
+    env = gym.make(TASKS["formation-waypoint"], num_drones=2)
+    team = make_team(env)
+    run(env, team, 30)
+    before = [p.detach().clone() for p in team.actor.parameters()]
+    team.reset_drone(1)
+    for old, new in zip(before, team.actor.parameters()):
+        assert torch.equal(old[0], new[0])  # the other drone is untouched
+        assert not torch.equal(old[1], new[1])
+    assert team.actor_optim.param_groups[0]["_trace"][1].abs().sum() == 0
+    team.new_task()
+    assert team.return_stats.count == 0
+    assert all(g["_trace"].abs().sum() == 0 for o in (team.actor_optim, team.critic_optim) for g in o.param_groups)
+    run(env, team, 30)  # keeps learning
