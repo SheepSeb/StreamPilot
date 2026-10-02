@@ -36,7 +36,7 @@ import streampilot.env  # noqa: E402, F401  (registers the environments)
 from streampilot.policy import TeamPolicy  # noqa: E402
 from streampilot.stream_x import agents as stream_ac  # noqa: E402
 from streampilot.stream_x.multi_agent import CentralizedStreamAC, IndependentStreamAC  # noqa: E402
-from streampilot.train_formation import TASKS, summarize  # noqa: E402
+from streampilot.train_formation import TASKS, RunLog, summarize  # noqa: E402
 from streampilot.vec_env import episode_summary  # noqa: E402
 
 
@@ -76,10 +76,11 @@ def evaluate(checkpoint: Path, config: dict, episodes: int, seed: int) -> dict:
     return summarize(results, "eval")
 
 
-def log_eval(checkpoint: Path, config: dict, episodes: int, step: int) -> dict:
+def log_eval(logger: RunLog, checkpoint: Path, config: dict, episodes: int, step: int, compute: dict) -> dict:
     # Same seeds every time, so evaluations are comparable across checkpoints.
     result = evaluate(checkpoint, config, episodes, seed=10_000)
-    trackio.log(result, step=step)
+    logger.log(result | compute, step)
+    logger.flush()
     return result
 
 
@@ -88,12 +89,18 @@ def parse_args() -> argparse.Namespace:
         description="Train a formation task with Stream AC(lambda): per-drone actors, independent or centralised critic."
     )
     parser.add_argument("task", choices=TASKS)
-    parser.add_argument("--drones", type=int, default=3, choices=[2, 3])
+    parser.add_argument("--drones", type=int, default=3, choices=[1, 2, 3, 4, 5])
     parser.add_argument(
         "--critic",
         choices=["independent", "centralized"],
         default="independent",
         help="independent: one critic per drone, of its own features; centralized: one shared critic of the joint observation",
+    )
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="fuse the update with torch.compile: same math, ~25%% faster, ~1 min compile at the start",
     )
     parser.add_argument("--steps", type=int, default=2_000_000, help="team steps")
     parser.add_argument("--seed", type=int, default=0)
@@ -119,6 +126,7 @@ def main() -> None:
     algo = "cstream_ac" if args.critic == "centralized" else "istream_ac"
     out = args.out or Path("runs") / f"{algo}_{args.task}{drones}_seed{args.seed}"
     out.mkdir(parents=True, exist_ok=True)
+    logger = RunLog(out)
 
     env_kwargs = {"num_drones": args.drones}
     if args.obs_mode == "detection":
@@ -149,11 +157,18 @@ def main() -> None:
         entropy_coeff=args.entropy_coeff,
     )
 
+    if args.compile:
+        team.compile()
+
     trackio.init(project=args.project, name=out.name, group=args.task, config={**config, **vars(args), "out": str(out)})
     recent = deque(maxlen=args.log_every)
-    abs_td = []
-    start, episode = time.perf_counter(), 0
+    abs_td, scales = [], []
+    start, episode, eval_seconds = time.perf_counter(), 0, 0.0
     total, length = 0.0, 0
+
+    def compute(now: float) -> dict:
+        # Cumulative at the current step, for a compute axis next to the team steps; evaluation time excluded.
+        return {"train/grad_updates": step * team.updates_per_step, "train/wall_seconds": now - start - eval_seconds}
 
     obs, _ = env.reset(seed=args.seed)
     team.reset(obs)
@@ -163,6 +178,7 @@ def main() -> None:
         done = terminated or truncated
         # Truncation (time limit) is not a real end, so each learner still bootstraps from obs.
         abs_td.append(np.abs(team.observe(actions, reward, obs, terminated, done)))
+        scales.append(team.step_scales())
         total += reward
         length += 1
 
@@ -175,9 +191,17 @@ def main() -> None:
             else:
                 for i, td in enumerate(mean_td):
                     metrics[f"train/abs_td_error_d{i}"] = float(td)
-            trackio.log(metrics, step=step)
+            # ObGD's bound: the mean step size relative to lr, and how often it shrank the step.
+            for name in ("actor", "critic"):
+                per_step = np.stack([s[name] for s in scales])  # (steps, learners)
+                for i, (mean, active) in enumerate(zip(per_step.mean(0), (per_step < 1.0).mean(0))):
+                    suffix = "" if per_step.shape[1] == 1 else f"_d{i}"
+                    metrics[f"train/{name}_step_scale{suffix}"] = float(mean)
+                    metrics[f"train/{name}_bound_active{suffix}"] = float(active)
+            logger.log(metrics, step)
             recent.append(summary)
             abs_td.clear()
+            scales.clear()
             total, length = 0.0, 0
             episode += 1
             if episode % args.log_every == 0:
@@ -189,17 +213,19 @@ def main() -> None:
                     f"collision {log['recent/collision']:4.2f}  {steps_per_sec:6.0f} steps/s",
                     flush=True,
                 )
-                trackio.log({"train/steps_per_sec": steps_per_sec}, step=step)
+                logger.log({"train/steps_per_sec": steps_per_sec}, step)
             obs, _ = env.reset()
             team.reset(obs)
 
         if step % args.eval_every == 0:
+            t0 = time.perf_counter()
             save_checkpoint(out / "latest.pt", config, team, env)
-            log_eval(out / "latest.pt", config, args.eval_episodes, step)
+            log_eval(logger, out / "latest.pt", config, args.eval_episodes, step, compute(t0))
+            eval_seconds += time.perf_counter() - t0
 
     save_checkpoint(out / "final.pt", config, team, env)
     env.close()
-    result = log_eval(out / "final.pt", config, args.final_eval_episodes, args.steps)
+    result = log_eval(logger, out / "final.pt", config, args.final_eval_episodes, args.steps, compute(time.perf_counter()))
     print(f"eval ({args.final_eval_episodes} episodes, deterministic): {result}", flush=True)
     trackio.finish()
 

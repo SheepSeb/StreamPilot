@@ -15,4 +15,4 @@ wheels/
 .claude/
 
 # Training runs
-runs/
+*runs*/

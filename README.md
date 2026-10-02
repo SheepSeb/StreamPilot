@@ -66,9 +66,9 @@ obs, info = env.reset(seed=0)  # obs = [visible, cx, cy, w, h]
 
 ## Formation tasks (multiple drones)
 
-Teams of 2 or 3 drones (`num_drones`, default 3) do the same three tasks together, in a formation:
+Teams of 2 to 5 drones (`num_drones`, default 3) do the same three tasks together, in a formation:
 a column (one drone in front of the other) for two drones, an equilateral triangle with the leader
-(drone 0) at the apex for three. Slots are `formation_spacing` (1 m) apart.
+(drone 0) at the apex for three, a diamond for four and a wedge for five. Slots are `formation_spacing` (1 m) apart.
 
 | ID                          | Task |
 | --------------------------- | ---- |
@@ -216,6 +216,11 @@ uv run streampilot formation-landing --policy runs/mappo_formation-landing_seed0
 - **Critic:** centralised and used only in training. It sees every drone's features and, by default
   (`--no-critic-state` turns it off), their privileged state, and predicts one value for the team
   reward.
+- **IPPO:** `--algo ippo` swaps the critic for a local one (de Witt et al. 2020, *Is Independent
+  Learning All You Need in the StarCraft Multi-Agent Challenge?*). One critic, shared by the drones,
+  sees only a drone's own features (and, by default, its own state) and predicts that drone's value
+  of the team reward, so each drone gets its own advantage. The actor and update are unchanged, so
+  the two differ only in the critic. Runs go to `runs/ippo_TASK[_2d]_seedSEED/`.
 - **Update:** as in the PPO baseline: GAE, clipped losses, a linearly annealed learning rate,
   bootstrapping through time limits, and online observation and reward normalization. The team
   advantage is shared by the drones, and each has its own probability ratio.
@@ -238,7 +243,7 @@ steps/s) with CPU updates and 7,000 with GPU updates. The simulation takes about
 the GPU helps less than more free cores would. The networks are small; the GPU matters more with
 larger `--hidden-size` or `--num-envs`.
 
-Runs go to `runs/mappo_TASK[_2d]_seedSEED/`. They log to the same Trackio project and have the same
+Runs go to `runs/ALGO_TASK[_2d]_seedSEED/`. They log to the same Trackio project and have the same
 checkpoints as the other algorithms. Every update logs the episodes that ended in its rollout
 (return, success, collisions, out-of-bounds, formation error), the losses and the throughput.
 Every `--eval-every` steps (1M) a deterministic evaluation runs on fixed seeds. `--steps` counts

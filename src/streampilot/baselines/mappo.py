@@ -5,9 +5,11 @@ for the formation tasks, trained on many environments at once.
   features: its last ``num_frames`` observation rows and its previous action, as in the
   single-drone tasks. The row's slot one-hot tells the drones apart. It is decentralised, so
   each drone runs it on its own row at deployment (``streampilot.policy.TeamPolicy``).
-- **Critic:** centralised, used only in training. It sees every drone's features and, with
-  ``critic_state``, the privileged state of every drone, and predicts one value for the team
-  reward.
+- **Critic:** used only in training. With MAPPO it is centralised: it sees every drone's features
+  and, with ``critic_state``, the privileged state of every drone, and predicts one value for the
+  team reward. With IPPO (``independent``; de Witt et al. 2020) it is local: one critic, shared by
+  the drones, sees only a drone's own features (and state) and predicts that drone's value of the
+  team reward, so each drone has its own advantage.
 - **Update:** as ``ppo.PPO`` (CleanRL's ``ppo_continuous_action``): GAE, clipped policy and value
   losses, several epochs of minibatches, a linearly annealed learning rate, and bootstrapping
   through time-limit truncation. The team advantage of a step is shared by its drones, and each
@@ -72,6 +74,7 @@ class MAPPO:
         num_drones: int,
         num_envs: int,
         total_steps: int,
+        independent: bool = False,
         hidden_size: int = 64,
         critic_hidden_size: int = 128,
         lr: float = 3e-4,
@@ -105,23 +108,25 @@ class MAPPO:
         # Rollout storage on the host (pinned, so the copy to the GPU is one fast transfer).
         pin = self.device.type == "cuda"
         T, E, n = rollout_steps, num_envs, num_drones
+        m = n if independent else 1  # critic inputs per environment
 
         def buffer(*shape, dtype=torch.float32):
             return torch.zeros(shape, dtype=dtype, pin_memory=pin)
 
         self._buf = {
             "actor_x": buffer(T, E, n, actor_dim),
-            "critic_x": buffer(T, E, critic_dim),
+            "critic_x": buffer(T, E, m, critic_dim),
             "actions": buffer(T, E, n, action_dim),
             "rewards": buffer(T, E),
             "terminated": buffer(T, E),
             "done": buffer(T, E),
             # Critic input of the terminal observation, where an episode ended (for bootstrapping).
-            "final_critic_x": buffer(T, E, critic_dim),
-            "next_critic_x": buffer(E, critic_dim),
+            "final_critic_x": buffer(T, E, m, critic_dim),
+            "next_critic_x": buffer(E, m, critic_dim),
         }
         self._np = {k: v.numpy() for k, v in self._buf.items()}
         self._t = 0
+        self.grad_updates = 0  # network updates so far: per optimizer step, the shared actor and the critic
 
     @torch.inference_mode()
     def act(self, actor_x: np.ndarray) -> np.ndarray:
@@ -133,13 +138,15 @@ class MAPPO:
         return self.rollout_actor.deterministic(torch.from_numpy(actor_x)).numpy()
 
     def store(self, actor_x, critic_x, actions, rewards, terminated, done, final_critic_x=None) -> None:
-        """Record one step of every environment. ``final_critic_x``: the critic input of the terminal
-        observation of each environment where ``done`` (in environment order)."""
+        """Record one step of every environment. ``critic_x`` is ``(E, critic_dim)``, or
+        ``(E, num_drones, critic_dim)`` when independent. ``final_critic_x``: the critic input of the
+        terminal observation of each environment where ``done`` (in environment order)."""
         b, t = self._np, self._t
-        b["actor_x"][t], b["critic_x"][t], b["actions"][t] = actor_x, critic_x, actions
+        b["actor_x"][t], b["actions"][t] = actor_x, actions
+        b["critic_x"][t] = np.reshape(critic_x, b["critic_x"].shape[1:])
         b["rewards"][t], b["terminated"][t], b["done"][t] = rewards, terminated, done
         if final_critic_x is not None:
-            b["final_critic_x"][t, done] = final_critic_x
+            b["final_critic_x"][t, done] = np.reshape(final_critic_x, (-1, *b["final_critic_x"].shape[2:]))
         self._t += 1
 
     @property
@@ -149,7 +156,7 @@ class MAPPO:
     def update(self, next_critic_x: np.ndarray) -> dict:
         """One PPO update on the stored rollout; ``next_critic_x`` is the critic input after its last step."""
         assert self.rollout_full
-        self._np["next_critic_x"][:] = next_critic_x
+        self._np["next_critic_x"][:] = np.reshape(next_critic_x, self._np["next_critic_x"].shape)
         b = {k: v.to(self.device, non_blocking=True) for k, v in self._buf.items()}
         T, E = b["rewards"].shape
 
@@ -158,15 +165,15 @@ class MAPPO:
         with torch.no_grad():
             mu, std = self.actor(b["actor_x"])
             old_log_probs = Normal(mu, std, validate_args=False).log_prob(b["actions"]).sum(-1)  # (T, E, n)
-            values = self.critic(b["critic_x"]).squeeze(-1)  # (T, E)
-            next_values = torch.cat([values[1:], self.critic(b["next_critic_x"]).T])
+            values = self.critic(b["critic_x"]).squeeze(-1)  # (T, E, m)
+            next_values = torch.cat([values[1:], self.critic(b["next_critic_x"]).squeeze(-1)[None]])
             ended = b["done"].bool()
             next_values[ended] = self.critic(b["final_critic_x"][ended]).squeeze(-1)
-            not_terminal = 1.0 - b["terminated"]
-            deltas = b["rewards"] + self.gamma * not_terminal * next_values - values
-            carry = self.gamma * self.gae_lambda * (1.0 - b["done"])
+            not_terminal = (1.0 - b["terminated"]).unsqueeze(-1)
+            deltas = b["rewards"].unsqueeze(-1) + self.gamma * not_terminal * next_values - values
+            carry = (self.gamma * self.gae_lambda * (1.0 - b["done"])).unsqueeze(-1)
             advantages = torch.empty_like(deltas)
-            gae = torch.zeros(E, device=self.device)
+            gae = torch.zeros_like(deltas[0])
             for t in reversed(range(T)):
                 gae = deltas[t] + carry[t] * gae
                 advantages[t] = gae
@@ -174,7 +181,7 @@ class MAPPO:
 
         actor_x, actions = b["actor_x"].flatten(0, 1), b["actions"].flatten(0, 1)
         critic_x, old_log_probs = b["critic_x"].flatten(0, 1), old_log_probs.flatten(0, 1)
-        advantages, returns, values = advantages.flatten(), returns.flatten(), values.flatten()
+        advantages, returns, values = advantages.flatten(0, 1), returns.flatten(0, 1), values.flatten(0, 1)
 
         stats = []
         for _ in range(self.epochs):
@@ -184,12 +191,12 @@ class MAPPO:
                 log_ratio = dist.log_prob(actions[idx]).sum(-1) - old_log_probs[idx]  # (B, n)
                 ratio = log_ratio.exp()
                 adv = advantages[idx]
-                adv = ((adv - adv.mean()) / (adv.std() + 1e-8)).unsqueeze(-1)  # shared by the drones
+                adv = (adv - adv.mean()) / (adv.std() + 1e-8)  # (B, 1): shared by the drones, or (B, n)
                 policy_loss = torch.max(
                     -adv * ratio, -adv * ratio.clamp(1 - self.clip_coef, 1 + self.clip_coef)
                 ).mean()
 
-                value = self.critic(critic_x[idx]).squeeze(-1)
+                value = self.critic(critic_x[idx]).squeeze(-1)  # (B, m)
                 clipped = values[idx] + (value - values[idx]).clamp(-self.clip_coef, self.clip_coef)
                 value_loss = 0.5 * torch.max((value - returns[idx]) ** 2, (clipped - returns[idx]) ** 2).mean()
                 entropy = dist.entropy().sum(-1).mean()
@@ -199,6 +206,7 @@ class MAPPO:
                 loss.backward()
                 nn.utils.clip_grad_norm_(self._params, self.max_grad_norm)
                 self.optim.step()
+                self.grad_updates += 2
                 with torch.no_grad():
                     approx_kl = ((ratio - 1) - log_ratio).mean()
                     clip_frac = ((ratio - 1).abs() > self.clip_coef).float().mean()
@@ -242,7 +250,9 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target-kl", type=float, default=None, help="stop the epochs early above this KL")
 
 
-def make_agent(args: argparse.Namespace, actor_dim: int, critic_dim: int, action_dim: int, num_drones: int, device):
+def make_agent(
+    args: argparse.Namespace, actor_dim: int, critic_dim: int, action_dim: int, num_drones: int, device, independent=False
+):
     return MAPPO(
         actor_dim,
         critic_dim,
@@ -250,6 +260,7 @@ def make_agent(args: argparse.Namespace, actor_dim: int, critic_dim: int, action
         num_drones,
         num_envs=args.num_envs,
         total_steps=args.steps,
+        independent=independent,
         hidden_size=args.hidden_size,
         critic_hidden_size=args.critic_hidden_size,
         lr=args.lr,

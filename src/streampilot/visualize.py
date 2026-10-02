@@ -216,7 +216,7 @@ def main() -> None:
     parser.add_argument("--detection-dropout", type=float, default=0.0)
     parser.add_argument("--episodes", type=int, default=None, help="default: until the viewer is closed")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--drones", type=int, default=3, help="formation tasks: 2 or 3 drones")
+    parser.add_argument("--drones", type=int, default=3, help="formation tasks: 2 to 5 drones")
     args = parser.parse_args()
     formation = args.task in FORMATION_TASKS
 

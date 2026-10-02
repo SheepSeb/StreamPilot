@@ -89,6 +89,7 @@ def make_mappo(team: Team, num_envs: int, rollout_steps: int = 16) -> MAPPO:
         team.venv.num_drones,
         num_envs,
         total_steps=10 * rollout_steps * num_envs,
+        independent=team.independent,
         hidden_size=32,
         critic_hidden_size=32,
         rollout_steps=rollout_steps,
@@ -121,6 +122,21 @@ def test_mappo_update(venv):
         assert np.isfinite(list(metrics.values())).all()
     assert any(not torch.equal(b, p) for b, p in zip(before, agent.actor.parameters()))
     assert agent.optim.param_groups[0]["lr"] < 3e-4  # linearly annealed
+
+
+def test_ippo_update(venv):
+    torch.manual_seed(0)
+    team = Team(venv, num_frames=2, critic_state=True, independent=True)
+    assert team.critic_dim == team.actor_dim + venv.state_dim  # a drone's own features and state
+    agent = make_mappo(team, venv.num_envs)
+    actor_x, critic_x = team.reset(venv.reset(seeds=[0, 1, 2]))
+    assert critic_x.shape == (venv.num_envs, venv.num_drones, team.critic_dim)
+    before = [p.clone() for p in agent.critic.parameters()]
+    for _ in range(2):
+        actor_x, critic_x = collect(venv, team, agent, actor_x, critic_x)
+        metrics = agent.update(critic_x)
+        assert np.isfinite(list(metrics.values())).all()
+    assert any(not torch.equal(b, p) for b, p in zip(before, agent.critic.parameters()))
 
 
 def test_checkpoint_team_policy_matches_training_agent(venv, tmp_path):

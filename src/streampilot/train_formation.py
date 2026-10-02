@@ -1,8 +1,9 @@
-"""Train a formation task (multiple drones) with MAPPO on many environments in parallel.
+"""Train a formation task (multiple drones) with MAPPO or IPPO on many environments in parallel.
 
     uv run streampilot-train-formation formation-waypoint
     uv run streampilot-train-formation formation-landing --drones 2 --num-envs 128
     uv run streampilot-train-formation formation-tracking --device cpu   # no GPU
+    uv run streampilot-train-formation formation-waypoint --algo ippo     # local critics
     uv run streampilot-train-formation formation-waypoint --help          # all hyperparameters
 
 ``--num-envs`` environments run in ``--num-workers`` processes (default: one per CPU thread).
@@ -69,16 +70,23 @@ class Team:
     observation rows and its previous action) and the critic input (all of the drones' actor
     inputs and, with privileged state, their states), both normalized."""
 
-    def __init__(self, venv: FormationVecEnv, num_frames: int, critic_state: bool):
-        self.venv, self.critic_state = venv, critic_state
+    def __init__(self, venv: FormationVecEnv, num_frames: int, critic_state: bool, independent: bool = False):
+        self.venv, self.critic_state, self.independent = venv, critic_state, independent
         self.history = TeamHistory(venv.num_envs, venv.num_drones, venv.obs_dim, venv.action_dim, num_frames)
         n = venv.num_drones
         self.actor_dim = self.history.dim
-        self.critic_dim = n * self.actor_dim + (n * venv.state_dim if critic_state else 0)
+        # Centralised: every drone's features (and state). Independent: the drone's own.
+        k = 1 if independent else n
+        self.critic_dim = k * (self.actor_dim + (venv.state_dim if critic_state else 0))
         self.actor_norm = Normalizer(self.actor_dim)
         self.critic_norm = Normalizer(self.critic_dim)
 
     def _critic_x(self, features, state, update: bool) -> np.ndarray:
+        """``(E, critic_dim)``, or ``(E, num_drones, critic_dim)`` when independent."""
+        if self.independent:
+            parts = [features] + ([state] if self.critic_state else [])
+            x = np.concatenate(parts, axis=-1)
+            return self.critic_norm(x.reshape(-1, self.critic_dim), update).reshape(x.shape)
         parts = [features.reshape(len(features), -1)]
         if self.critic_state:
             parts.append(state.reshape(len(state), -1))
@@ -131,6 +139,26 @@ def summarize(episodes: list[dict], prefix: str) -> dict:
     return {f"{prefix}/{key}": float(np.mean(values)) for key, values in by_key.items()}
 
 
+class RunLog:
+    """Logs to Trackio and keeps every row for ``out/metrics.parquet`` (one row per ``log`` call, one
+    column per metric, ``step`` first), rewritten at each ``flush``."""
+
+    def __init__(self, out: Path):
+        self.path, self.rows = out / "metrics.parquet", []
+
+    def log(self, metrics: dict, step: int) -> None:
+        trackio.log(metrics, step=step)
+        self.rows.append({"step": step, **metrics})
+
+    def flush(self) -> None:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        keys = ["step", *sorted({k for row in self.rows for k in row} - {"step"})]
+        table = pa.table({k: pa.array([row.get(k) for row in self.rows], type=pa.float64()) for k in keys})
+        pq.write_table(table, self.path)
+
+
 def evaluate(venv: FormationVecEnv, agent: mappo.MAPPO, team: Team, episodes: int, seed: int) -> dict:
     """Deterministic episodes on seeds ``seed, seed + 1, ...``, with the normalization frozen.
     Uses (and resets) the training environments."""
@@ -158,9 +186,12 @@ def evaluate(venv: FormationVecEnv, agent: mappo.MAPPO, team: Team, episodes: in
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a formation task with MAPPO on parallel environments.")
+    parser = argparse.ArgumentParser(description="Train a formation task with MAPPO or IPPO on parallel environments.")
     parser.add_argument("task", choices=TASKS)
-    parser.add_argument("--drones", type=int, default=3, choices=[2, 3])
+    parser.add_argument(
+        "--algo", choices=["mappo", "ippo"], default="mappo", help="centralised or independent (local) critics"
+    )
+    parser.add_argument("--drones", type=int, default=3, choices=[1, 2, 3, 4, 5])
     parser.add_argument("--steps", type=int, default=20_000_000, help="team steps, over all environments")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--obs-mode", choices=["detection", "state"], default="detection")
@@ -171,18 +202,18 @@ def parse_args() -> argparse.Namespace:
         "--critic-state",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="give the centralised critic the privileged state of every drone",
+        help="give the critic the privileged state (of every drone with MAPPO, of its own drone with IPPO)",
     )
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=None, help="default: one per CPU thread")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:1, ... (for the updates)")
-    parser.add_argument("--out", type=Path, default=None, help="default: runs/mappo_TASK[_Nd]_seedSEED")
+    parser.add_argument("--out", type=Path, default=None, help="default: runs/ALGO_TASK[_Nd]_seedSEED")
     parser.add_argument("--project", default="streampilot", help="Trackio project")
     parser.add_argument("--log-every", type=int, default=10, help="updates between progress lines")
     parser.add_argument("--eval-every", type=int, default=1_000_000, help="steps between evaluations and checkpoints")
     parser.add_argument("--eval-episodes", type=int, default=64)
     parser.add_argument("--final-eval-episodes", type=int, default=128)
-    mappo.add_args(parser.add_argument_group("MAPPO hyperparameters"))
+    mappo.add_args(parser.add_argument_group("MAPPO / IPPO hyperparameters"))
     return parser.parse_args()
 
 
@@ -195,15 +226,16 @@ def main() -> None:
     torch.set_num_threads(1)
     torch.manual_seed(args.seed)
     drones = "" if args.drones == 3 else f"_{args.drones}d"
-    out = args.out or Path("runs") / f"mappo_{args.task}{drones}_seed{args.seed}"
+    out = args.out or Path("runs") / f"{args.algo}_{args.task}{drones}_seed{args.seed}"
     out.mkdir(parents=True, exist_ok=True)
+    logger = RunLog(out)
 
     env_kwargs = {"num_drones": args.drones, "obs_mode": args.obs_mode}
     if args.obs_mode == "detection":
         env_kwargs |= {"detection_noise": args.detection_noise, "detection_dropout": args.detection_dropout}
     config = {
         "task": args.task,
-        "algo": "mappo",
+        "algo": args.algo,
         "obs_mode": args.obs_mode,
         "env_kwargs": {k: v for k, v in env_kwargs.items() if k != "obs_mode"},
         "num_frames": args.frames,
@@ -212,8 +244,10 @@ def main() -> None:
         "critic_state": args.critic_state,
     }
     venv = FormationVecEnv(TASKS[args.task], env_kwargs, args.num_envs, args.num_workers, args.critic_state)
-    team = Team(venv, args.frames, args.critic_state)
-    agent = mappo.make_agent(args, team.actor_dim, team.critic_dim, venv.action_dim, venv.num_drones, device)
+    team = Team(venv, args.frames, args.critic_state, independent=args.algo == "ippo")
+    agent = mappo.make_agent(
+        args, team.actor_dim, team.critic_dim, venv.action_dim, venv.num_drones, device, team.independent
+    )
     batch = args.rollout_steps * args.num_envs
     num_updates = max(args.steps // batch, 1)
     workers = len(venv._slices)
@@ -238,7 +272,7 @@ def main() -> None:
     actor_x, critic_x = fresh_start()
     episodes: list[dict] = []
     step, start = 0, time.perf_counter()
-    sample_time = update_time = 0.0
+    sample_time = update_time = eval_time = 0.0
     next_eval = args.eval_every
 
     for update in range(1, num_updates + 1):
@@ -271,7 +305,8 @@ def main() -> None:
         log["train/steps_per_sec"] = step / (t2 - start)
         log["train/sample_steps_per_sec"] = batch / (t1 - t0)
         log["train/update_seconds"] = t2 - t1
-        trackio.log(log, step=step)
+        compute = {"train/grad_updates": agent.grad_updates, "train/wall_seconds": t2 - start - eval_time}
+        logger.log(log, step)
         if update % args.log_every == 0 or update == num_updates:
             ret = log.get("episode/return", float("nan"))
             success = log.get("episode/is_success", float("nan"))
@@ -287,13 +322,16 @@ def main() -> None:
             next_eval += args.eval_every
             save_checkpoint(out / "latest.pt", config, agent, team)
             result = evaluate(venv, agent, team, args.eval_episodes, seed=10_000)
-            trackio.log(result, step=step)
+            logger.log(result | compute, step)
+            logger.flush()
+            eval_time += time.perf_counter() - t2
             actor_x, critic_x = fresh_start()
             running_return[:] = 0.0
 
     save_checkpoint(out / "final.pt", config, agent, team)
     result = evaluate(venv, agent, team, args.final_eval_episodes, seed=10_000)
-    trackio.log(result, step=step)
+    logger.log(result | compute, step)
+    logger.flush()
     venv.close()
     print(f"eval ({args.final_eval_episodes} episodes, deterministic): {result}", flush=True)
     trackio.finish()

@@ -111,7 +111,12 @@ class StreamAC:
         return delta
 
     def observe(self, obs, action, reward: float, next_obs, terminated: bool, done: bool) -> dict:
-        return {"abs_td_error": abs(self.update(obs, action, reward, next_obs, terminated, done))}
+        delta = self.update(obs, action, reward, next_obs, terminated, done)
+        return {
+            "abs_td_error": abs(delta),
+            "actor_step_scale": self.actor_optim.last_scale,
+            "critic_step_scale": self.critic_optim.last_scale,
+        }
 
     def state_dict(self) -> dict:
         return {"actor": self.actor.state_dict(), "critic": self.critic.state_dict()}

@@ -25,7 +25,22 @@ EPISODE_INFO = (
     "standoff_error",
     "distance",
     "heading_error",
+    "mean_target_in_view",
+    "mean_on_target",
+    "mean_formation_error",
+    "mean_heading_error",
+    "mean_standoff_error",
+    "mean_distance",
+    "mean_separation",
+    "mean_inter_drone_distance",
 )
+# Per-drone ``info`` arrays, reported per finished episode as ``NAME_d0``, ``NAME_d1``, ...
+EPISODE_INFO_PER_DRONE = {
+    "drone_return": "return",
+    "mean_target_in_view_per_drone": "mean_target_in_view",
+    "mean_formation_error_per_drone": "mean_formation_error",
+    "mean_heading_error_per_drone": "mean_heading_error",
+}
 
 
 def _shared(shape, dtype) -> tuple[mp.Array, tuple, np.dtype]:
@@ -60,8 +75,13 @@ def episode_summary(info: dict, ret: float, length: int) -> dict:
     for key in EPISODE_INFO:
         if key in info:
             summary[key] = float(np.mean(info[key]))
+    for key, name in EPISODE_INFO_PER_DRONE.items():
+        for i, value in enumerate(info.get(key, ())):
+            summary[f"{name}_d{i}"] = float(value)
     summary.setdefault("collision", 0.0)
     summary.setdefault("out_of_bounds", 0.0)
+    # Survived: ended without a collision or leaving the arena (a time-limit end is a survival).
+    summary["survived"] = float(not (summary["collision"] or summary["out_of_bounds"]))
     return summary
 
 

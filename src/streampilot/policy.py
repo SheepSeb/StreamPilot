@@ -1,4 +1,4 @@
-"""Run a trained policy (Stream AC, PPO, SAC, MAPPO, independent or centralised-critic Stream AC)
+"""Run a trained policy (Stream AC, PPO, SAC, MAPPO, IPPO, independent or centralised-critic Stream AC)
 from raw environment (or real detector) observations."""
 
 from pathlib import Path
@@ -15,6 +15,7 @@ ACTORS = {
     "ppo": ppo.Actor,
     "sac": sac.Actor,
     "mappo": mappo.Actor,
+    "ippo": mappo.Actor,
     "istream_ac": stream_ac.Actor,
     "cstream_ac": stream_ac.Actor,
 }
@@ -62,7 +63,7 @@ class Policy:
 
 class TeamPolicy:
     """A formation-task checkpoint run on a whole team: one ``Policy`` per drone, each with its own
-    observation history. With MAPPO the drones share the actor and its normalization; with
+    observation history. With MAPPO and IPPO the drones share the actor and its normalization; with
     independent or centralised-critic Stream AC (``checkpoint["drones"]``) each drone has its own.
     On the real team each drone runs its own ``Policy`` on its own observation row::
 

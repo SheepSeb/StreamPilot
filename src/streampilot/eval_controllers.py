@@ -53,7 +53,7 @@ def main() -> None:
     parser.add_argument("tasks", nargs="*", default=[*TASKS, *FORMATION_TASKS])
     parser.add_argument("--controllers", nargs="+", default=["scripted", "pid", "mpc"], choices=["scripted", "pid", "mpc"])
     parser.add_argument("--episodes", type=int, default=20)
-    parser.add_argument("--drones", type=int, default=3, choices=[2, 3])
+    parser.add_argument("--drones", type=int, default=3, choices=[1, 2, 3, 4, 5])
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 

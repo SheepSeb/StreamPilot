@@ -35,6 +35,7 @@ from streampilot.stream_x.optim import BatchedObGD, ObGD
 from streampilot.stream_x.wrappers import ObservationHistory, RunningMeanStd
 
 EPSILON = 1e-8
+Normal.set_default_validate_args(False)  # per-step argument checks cost more than the arithmetic
 
 
 class BatchedLinear(nn.Module):
@@ -90,6 +91,8 @@ class _StreamTeam:
         num_critics: int,
     ):
         self.num_drones, self.gamma, self.entropy_coeff = num_drones, gamma, entropy_coeff
+        # Network updates per team step: one per actor (one per drone) and one per critic.
+        self.updates_per_step = num_drones + num_critics
         self.histories = [ObservationHistory(obs_dim, action_dim, num_frames) for _ in range(num_drones)]
         self.dim = self.histories[0].dim
         self.obs_stats = RunningMeanStd((num_drones, self.dim))  # elementwise, so one set per drone
@@ -99,6 +102,14 @@ class _StreamTeam:
         self.actor_optim = BatchedObGD(self.actor.parameters(), lr=lr, gamma=gamma, lamda=lamda, kappa=kappa_policy)
         self.features: np.ndarray | None = None  # (num_drones, dim), normalized
 
+    def step_scales(self) -> dict[str, np.ndarray]:
+        """ObGD's step size over ``lr`` in the last update (1: the bound was inactive), per drone
+        for the actors and per critic (``(1,)`` for a shared one)."""
+        return {
+            "actor": self.actor_optim.last_scale.numpy(),
+            "critic": np.atleast_1d(np.asarray(self.critic_optim.last_scale, dtype=np.float32)),
+        }
+
     def _normalize(self, features: np.ndarray) -> np.ndarray:
         self.obs_stats.update(features)
         return ((features - self.obs_stats.mean) / np.sqrt(self.obs_stats.var + EPSILON)).astype(np.float32)
@@ -106,6 +117,14 @@ class _StreamTeam:
     def _policy(self, x: torch.Tensor) -> Normal:
         mu, pre_std = self.actor(x.unsqueeze(1))
         return Normal(mu.squeeze(1), F.softplus(pre_std.squeeze(1)))
+
+    def compile(self) -> None:
+        """Fuse the update (forward, backward, optimizer step) with ``torch.compile``: the same
+        math, ~25% faster per step, for a one-off compile of about a minute at the first steps."""
+        self._loss = torch.compile(self._loss, dynamic=False)
+        self.actor_optim.compile()
+        if isinstance(self.critic_optim, BatchedObGD):
+            self.critic_optim.compile()
 
     def _push(self, actions, next_obs) -> np.ndarray:
         return self._normalize(np.stack([h.push(a, row) for h, a, row in zip(self.histories, actions, next_obs)]))
@@ -169,6 +188,12 @@ class IndependentStreamAC(_StreamTeam):
         self.critic = BatchedMLP(num_drones, self.dim, (1,), hidden_size)
         self.critic_optim = BatchedObGD(self.critic.parameters(), lr=lr, gamma=gamma, lamda=lamda, kappa=kappa_value)
 
+    def _loss(self, x, next_x, actions, scaled, not_terminated: torch.Tensor):
+        both = torch.stack([x, next_x], dim=1)  # (num_drones, 2, dim)
+        value, next_value = self.critic(both)[0].squeeze(-1).unbind(1)
+        delta = (scaled + self.gamma * not_terminated * next_value - value).detach()
+        return self._policy_loss(x, actions, delta) - value.sum(), delta
+
     def observe(self, actions, reward: float, next_obs, terminated: bool, done: bool) -> np.ndarray:
         """Every drone learns from its own row of the transition and the team reward. After
         ``done``, call ``reset`` with the next episode's first observation. Returns each drone's
@@ -177,13 +202,10 @@ class IndependentStreamAC(_StreamTeam):
         scaled = self._scale_reward(reward, terminated, done)
 
         x = torch.as_tensor(self.features)
-        both = torch.stack([x, torch.as_tensor(next_features)], dim=1)  # (num_drones, 2, dim)
-        value, next_value = self.critic(both)[0].squeeze(-1).unbind(1)
-        delta = (scaled + self.gamma * (1.0 - terminated) * next_value - value).detach()
-
         self.actor_optim.zero_grad()
         self.critic_optim.zero_grad()
-        (self._policy_loss(x, actions, delta) - value.sum()).backward()
+        loss, delta = self._loss(x, torch.as_tensor(next_features), torch.as_tensor(actions, dtype=torch.float32), scaled, torch.tensor(1.0 - terminated))
+        loss.backward()
         self.actor_optim.step(delta, reset=done)
         self.critic_optim.step(delta, reset=done)
         self.features = next_features
@@ -234,6 +256,13 @@ class CentralizedStreamAC(_StreamTeam):
         self.critic = Critic(num_drones * self.dim, hidden_size)
         self.critic_optim = ObGD(self.critic.parameters(), lr=lr, gamma=gamma, lamda=lamda, kappa=kappa_value)
 
+    def _loss(self, x, next_x, actions, scaled, not_terminated: torch.Tensor, advantages):
+        joint = torch.stack([x.flatten(), next_x.flatten()])  # (2, num_drones * dim)
+        value, next_value = self.critic(joint)
+        delta = (scaled + self.gamma * not_terminated * next_value - value).detach()
+        signal = delta.expand(self.num_drones) if advantages is None else advantages
+        return self._policy_loss(x, actions, signal) - value, delta
+
     def observe(self, actions, reward: float, next_obs, terminated: bool, done: bool, advantages=None) -> float:
         """The critic learns from the joint transition, each actor from its own row of it.
         ``advantages`` (``(num_drones,)``, optional) replaces the team TD error as the actors'
@@ -243,17 +272,13 @@ class CentralizedStreamAC(_StreamTeam):
         scaled = self._scale_reward(reward, terminated, done)[0]
 
         x = torch.as_tensor(self.features)
-        joint = torch.stack([x.flatten(), torch.as_tensor(next_features).flatten()])  # (2, num_drones * dim)
-        value, next_value = self.critic(joint)
-        delta = (scaled + self.gamma * (1.0 - terminated) * next_value - value).detach()
-        if advantages is None:
-            signal = delta.expand(self.num_drones)
-        else:
-            signal = torch.as_tensor(advantages, dtype=torch.float32).reshape(self.num_drones)
-
+        if advantages is not None:
+            advantages = torch.as_tensor(advantages, dtype=torch.float32).reshape(self.num_drones)
         self.actor_optim.zero_grad()
         self.critic_optim.zero_grad()
-        (self._policy_loss(x, actions, signal) - value).backward()  # disjoint parameters, as in StreamAC
+        loss, delta = self._loss(x, torch.as_tensor(next_features), torch.as_tensor(actions, dtype=torch.float32), scaled, torch.tensor(1.0 - terminated), advantages)
+        loss.backward()  # disjoint parameters, as in StreamAC
+        signal = delta.expand(self.num_drones) if advantages is None else advantages
         self.actor_optim.step(signal, reset=done)
         self.critic_optim.step(float(delta), reset=done)
         self.features = next_features

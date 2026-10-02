@@ -18,23 +18,40 @@ from streampilot.env.base import (
 )
 
 # One colour per drone, used for its waypoint and its landing spot.
-DRONE_COLORS = np.array([[0.1, 0.9, 0.2], [0.1, 0.6, 0.95], [0.95, 0.85, 0.1]])
+# Per-step ``info`` entries reported as episode means (``mean_<key>``); ``target_in_view`` gives the
+# fraction of steps the target is visible, ``on_target`` the tracking success rate.
+EPISODE_MEANS = (
+    "target_in_view",
+    "on_target",
+    "formation_error",
+    "heading_error",
+    "standoff_error",
+    "distance",
+    "separation",
+    "inter_drone_distance",
+)
+
+DRONE_COLORS = np.array([[0.1, 0.9, 0.2], [0.1, 0.6, 0.95], [0.95, 0.85, 0.1], [0.9, 0.2, 0.7], [0.95, 0.5, 0.1]])
 
 
 def formation_offsets(num_drones: int, spacing: float) -> np.ndarray:
     """Slot of each drone in the formation frame (x = forward, towards the target), in metres.
 
     Drone 0 leads at the origin. Two drones fly in a column (one in front of the other); three
-    in an equilateral triangle of side ``spacing`` with the leader at the apex.
+    in an equilateral triangle of side ``spacing`` with the leader at the apex; four in a diamond
+    (the triangle plus a tail drone), five in a wedge (two rows of two behind the leader). Every
+    pair of neighbouring slots is ``spacing`` apart.
     """
     back = -spacing * np.sqrt(3) / 2
     shapes = {
         1: [[0.0, 0.0]],
         2: [[0.0, 0.0], [-spacing, 0.0]],
         3: [[0.0, 0.0], [back, spacing / 2], [back, -spacing / 2]],
+        4: [[0.0, 0.0], [back, spacing / 2], [back, -spacing / 2], [2 * back, 0.0]],
+        5: [[0.0, 0.0], [back, spacing / 2], [back, -spacing / 2], [2 * back, spacing], [2 * back, -spacing]],
     }
     if num_drones not in shapes:
-        raise ValueError(f"num_drones must be 1, 2 or 3, got {num_drones}")
+        raise ValueError(f"num_drones must be between 1 and 5, got {num_drones}")
     return np.array(shapes[num_drones])
 
 
@@ -185,6 +202,8 @@ class FormationBaseEnv(SceneEnv):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         self.step_count = 0
+        self._episode_sums = {}
+        self._drone_return = np.zeros(self.num_drones)
         mujoco.mj_resetData(self.model, self.data)
         self._task_reset(options or {})
         mujoco.mj_forward(self.model, self.data)
@@ -205,9 +224,12 @@ class FormationBaseEnv(SceneEnv):
         self.step_count += 1
 
         reward, terminated, info = self._task_step()
-        reward -= self.ctrl_cost_weight * float(np.mean(np.sum(action**2, axis=1)))
+        ctrl_cost = self.ctrl_cost_weight * np.sum(action**2, axis=1)
+        reward -= float(np.mean(ctrl_cost))
+        drone_reward = info.pop("drone_reward", None)
         separation = self.min_pairwise_distance()
         info["separation"] = separation
+        info["inter_drone_distance"] = self.mean_pairwise_distance()
         if not terminated and separation < self.min_separation:
             reward -= self.collision_penalty
             terminated = True
@@ -219,8 +241,16 @@ class FormationBaseEnv(SceneEnv):
 
         if self.render_mode == "human":
             self.render()
+        if drone_reward is None:
+            drone_reward = np.full(self.num_drones, reward)
+        else:  # each drone's own task reward and control cost; the team's terminal penalties are shared
+            drone_reward = drone_reward - ctrl_cost
+            drone_reward += reward - float(np.mean(drone_reward))
+        info["drone_reward"] = drone_reward
         dets = self.target_detections()
-        return self._get_obs(dets), reward, terminated, False, self._get_info(info, dets)
+        info = self._get_info(info, dets)
+        self._accumulate(info)
+        return self._get_obs(dets), reward, terminated, False, info
 
     def detect(self, drone: int, geom_id: int) -> np.ndarray:
         """Exact ``[visible, cx, cy, w, h]`` box of ``geom_id`` in ``drone``'s onboard camera."""
@@ -285,6 +315,11 @@ class FormationBaseEnv(SceneEnv):
         a, b = self._pairs
         return float(np.min(np.linalg.norm(xy[a] - xy[b], axis=-1), initial=np.inf))
 
+    def mean_pairwise_distance(self) -> float:
+        xy = self.drone_pos[:, :2]
+        a, b = self._pairs
+        return float(np.mean(np.linalg.norm(xy[a] - xy[b], axis=-1))) if len(a) else 0.0
+
     # --- helpers for subclasses -------------------------------------------------------
 
     def _set_drone_states(self, xy, yaw) -> None:
@@ -333,6 +368,22 @@ class FormationBaseEnv(SceneEnv):
     def _get_info(self, info: dict[str, Any], dets: np.ndarray) -> dict[str, Any]:
         info["target_in_view"] = dets[:, 0].astype(bool)
         return info
+
+    def _accumulate(self, info: dict[str, Any]) -> None:
+        """Add this step's metrics to the running sums and report the episode means so far
+        (``mean_*``; over the whole episode once it ends), averaged over the drones. Per-drone
+        metrics also get ``mean_*_per_drone`` (one entry per drone), and ``drone_return`` is each
+        drone's return so far."""
+        self._drone_return += info["drone_reward"]
+        info["drone_return"] = self._drone_return.copy()
+        for key in EPISODE_MEANS:
+            if key in info:
+                value = np.asarray(info[key], dtype=float)
+                self._episode_sums[key] = self._episode_sums.get(key, 0.0) + value
+                mean = self._episode_sums[key] / self.step_count
+                info[f"mean_{key}"] = float(np.mean(mean))
+                if value.ndim > 0:
+                    info[f"mean_{key}_per_drone"] = mean
 
     # --- task hooks -------------------------------------------------------------------
 
