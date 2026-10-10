@@ -5,6 +5,8 @@ truncation bootstraps from the value of the final observation instead of cutting
 
 import argparse
 
+import math
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -33,10 +35,10 @@ def mlp(in_dim: int, out_dim: int, hidden_size: int, out_std: float) -> nn.Seque
 class Actor(nn.Module):
     """Gaussian policy with a state-independent log standard deviation."""
 
-    def __init__(self, obs_dim: int, action_dim: int, hidden_size: int = 64):
+    def __init__(self, obs_dim: int, action_dim: int, hidden_size: int = 64, init_std: float = 1.0):
         super().__init__()
         self.mean = mlp(obs_dim, action_dim, hidden_size, out_std=0.01)
-        self.log_std = nn.Parameter(torch.zeros(action_dim))
+        self.log_std = nn.Parameter(torch.full((action_dim,), math.log(init_std)))
 
     def forward(self, x):
         mu = self.mean(x)

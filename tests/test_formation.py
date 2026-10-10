@@ -11,7 +11,10 @@ import streampilot.env  # noqa: F401  (registers the environments)
 from streampilot.env.formation import formation_offsets
 from streampilot.visualize import formation_landing_policy, formation_policy
 
-ENV_IDS = ["DroneFormationWaypoint-v0", "DroneFormationLanding-v0", "DroneFormationTracking-v0"]
+ENV_IDS = ["DroneFormationWaypoint-v0", "DroneFormationLanding-v0", "DroneFormationTracking-v0", "DroneFormationFactory-v0",
+    "DroneFormationWarehouseWaypoint-v0",
+    "DroneFormationWarehouseLanding-v0",
+]
 
 
 def rollout(env, policy, seed):
@@ -147,6 +150,41 @@ def test_tracking_scripted_team_holds_formation(num_drones):
         assert np.mean([i["target_in_view"] for i in infos]) > 0.9
         assert followed > 2 * hovered
     env.close()
+
+
+@pytest.mark.parametrize("num_drones", [2, 3])
+def test_factory_scripted_team_escorts_agv(num_drones):
+    env = gym.make("DroneFormationFactory-v0", num_drones=num_drones)
+    base = env.unwrapped
+    for seed in range(3):
+        _, info, infos = rollout(env, formation_policy, seed)
+        assert len(infos) == 600 and "collision" not in info and "out_of_bounds" not in info, (seed, info)
+        assert np.max([i["formation_error"] for i in infos[100:]]) < 0.3
+        assert np.mean([i["target_in_view"] for i in infos]) > 0.9
+        assert info["inspection_coverage"] > 0
+        # The AGV stays on its loop.
+        lo, hi = base._corners.min(axis=0), base._corners.max(axis=0)
+        assert np.all(base._target_pos[:2] >= lo - 1e-9) and np.all(base._target_pos[:2] <= hi + 1e-9)
+    env.reset(options={"product": "solar_panel"})
+    np.testing.assert_allclose(base.model.geom_size[base._product_geom], [0.40, 0.26, 0.03])
+    env.close()
+
+
+@pytest.mark.parametrize("task", ["Waypoint", "Landing"])
+def test_warehouse_matches_plain_task(task):
+    """The warehouse is purely visual: same seed, same actions, same rewards and observations."""
+    plain, warehouse = gym.make(f"DroneFormation{task}-v0"), gym.make(f"DroneFormationWarehouse{task}-v0")
+    obs_a, _ = plain.reset(seed=0)
+    obs_b, _ = warehouse.reset(seed=0)
+    np.testing.assert_array_equal(obs_a, obs_b)
+    policy = formation_policy if task == "Waypoint" else formation_landing_policy
+    for _ in range(100):
+        obs_a, reward_a, *_ = plain.step(policy(plain.unwrapped))
+        obs_b, reward_b, *_ = warehouse.step(policy(warehouse.unwrapped))
+        np.testing.assert_array_equal(obs_a, obs_b)
+        assert reward_a == reward_b
+    plain.close()
+    warehouse.close()
 
 
 def test_rgb_render():

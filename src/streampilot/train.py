@@ -34,7 +34,16 @@ from streampilot.policy import Policy  # noqa: E402
 from streampilot.stream_x import agents as stream_ac  # noqa: E402
 from streampilot.stream_x.wrappers import HistoryObservation, NormalizeObservation, ScaleReward  # noqa: E402
 
-TASKS = {"waypoint": "DroneWaypoint-v0", "landing": "DroneLanding-v0", "tracking": "DroneTracking-v0"}
+TASKS = {
+    "waypoint": "DroneWaypoint-v0",
+    "landing": "DroneLanding-v0",
+    "tracking": "DroneTracking-v0",
+    "morphing": "DroneMorphingTracking-v0",
+    "warehouse-waypoint": "DroneWarehouseWaypoint-v0",
+    "warehouse-landing": "DroneWarehouseLanding-v0",
+    "warehouse-tracking": "DroneWarehouseTracking-v0",
+    "warehouse-morphing": "DroneWarehouseMorphingTracking-v0",
+}
 # Each module provides NORMALIZE, add_args(parser), make_agent(args, obs_dim, action_dim) and Actor.
 # Agents provide act(obs), observe(obs, action, reward, next_obs, terminated, done) -> metrics and
 # state_dict() (with the actor's weights under "actor").
@@ -134,6 +143,7 @@ def main() -> None:
         "num_frames": args.frames,
         "hidden_size": args.hidden_size,
         "gamma": args.gamma,
+        "bound_mean": getattr(args, "bound_mean", False),
     }
     env = make_env(config)
     env.action_space.seed(args.seed)

@@ -9,7 +9,10 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "gymnasium>=1.3.0",
+    "matplotlib>=3.11.2",
     "mujoco>=3.14.0",
+    "pandas>=3.0.6",
+    "pyarrow>=25.0.1",
     "torch>=2.14.0",
     "trackio>=0.38.1",
 ]
@@ -18,6 +21,9 @@ dependencies = [
 streampilot = "streampilot:main"
 streampilot-train = "streampilot.train:main"
 streampilot-train-formation = "streampilot.train_formation:main"
+streampilot-train-formation-stream = "streampilot.train_formation_stream:main"
+streampilot-continual = "streampilot.continual:main"
+streampilot-eval-controllers = "streampilot.eval_controllers:main"
 
 [build-system]
 requires = ["uv_build>=0.12.10,<0.13.0"]

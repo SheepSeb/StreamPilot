@@ -18,23 +18,41 @@ from streampilot.env.base import (
 )
 
 # One colour per drone, used for its waypoint and its landing spot.
-DRONE_COLORS = np.array([[0.1, 0.9, 0.2], [0.1, 0.6, 0.95], [0.95, 0.85, 0.1]])
+# Per-step ``info`` entries reported as episode means (``mean_<key>``); ``target_in_view`` gives the
+# fraction of steps the target is visible, ``on_target`` the tracking success rate.
+EPISODE_MEANS = (
+    "target_in_view",
+    "on_target",
+    "formation_error",
+    "heading_error",
+    "standoff_error",
+    "distance",
+    "separation",
+    "inter_drone_distance",
+    "proximity_cost",
+)
+
+DRONE_COLORS = np.array([[0.1, 0.9, 0.2], [0.1, 0.6, 0.95], [0.95, 0.85, 0.1], [0.9, 0.2, 0.7], [0.95, 0.5, 0.1]])
 
 
 def formation_offsets(num_drones: int, spacing: float) -> np.ndarray:
     """Slot of each drone in the formation frame (x = forward, towards the target), in metres.
 
     Drone 0 leads at the origin. Two drones fly in a column (one in front of the other); three
-    in an equilateral triangle of side ``spacing`` with the leader at the apex.
+    in an equilateral triangle of side ``spacing`` with the leader at the apex; four in a diamond
+    (the triangle plus a tail drone), five in a wedge (two rows of two behind the leader). Every
+    pair of neighbouring slots is ``spacing`` apart.
     """
     back = -spacing * np.sqrt(3) / 2
     shapes = {
         1: [[0.0, 0.0]],
         2: [[0.0, 0.0], [-spacing, 0.0]],
         3: [[0.0, 0.0], [back, spacing / 2], [back, -spacing / 2]],
+        4: [[0.0, 0.0], [back, spacing / 2], [back, -spacing / 2], [2 * back, 0.0]],
+        5: [[0.0, 0.0], [back, spacing / 2], [back, -spacing / 2], [2 * back, spacing], [2 * back, -spacing]],
     }
     if num_drones not in shapes:
-        raise ValueError(f"num_drones must be 1, 2 or 3, got {num_drones}")
+        raise ValueError(f"num_drones must be between 1 and 5, got {num_drones}")
     return np.array(shapes[num_drones])
 
 
@@ -72,8 +90,24 @@ class FormationBaseEnv(SceneEnv):
       ``[x, y, vx, vy, cos(yaw), sin(yaw), yaw_rate, task_obs, one-hot, teammates]``.
 
     Reward is the team's: the task's per-drone terms averaged over the drones, minus the average
-    control cost. The episode ends, with a penalty, if any drone leaves the arena or two drones
-    come closer than ``min_separation`` (horizontally; ~0.62 m is rotor-to-rotor contact).
+    control cost and the average proximity cost. The episode ends, with a penalty, if any drone
+    leaves the arena or two drones come closer than ``min_separation`` (horizontally; ~0.62 m is
+    rotor-to-rotor contact). The proximity cost warns before that: each drone pays
+    ``proximity_weight`` times, summed over its teammates, how far into the band between
+    ``proximity_distance`` and ``min_separation`` the teammate is (0 at the outer edge, 1 at contact).
+
+    ``separation_weight`` adds a longer-range warning that does not penalise holding a formation: potential-based
+    shaping (Ng et al. 1999, so it leaves the optimal behaviour unchanged) of the same band measure, but out to
+    ``separation_distance``. Each drone is rewarded ``separation_weight`` times the decrease, summed over its
+    teammates, of how far into that band they are (``gamma * phi(s') - phi(s)``, ``gamma = shaping_gamma``).
+    Closing in costs, moving apart pays, and standing still costs nothing at any distance.
+
+    ``wall_weight`` warns before leaving the arena in the same way: each drone pays it times how far
+    into the band ``wall_distance`` inside the arena edge it is (0 at the inner edge, 1 at the wall).
+
+    ``geofence`` (metres, ``None``: off) works like a flight controller's: the velocity command
+    away from the arena centre is cut as a drone nears ``geofence`` inside the edge, so it stays
+    in the arena instead of ending the episode, and can still recover.
 
     Subclasses define a task through ``_build_scene`` and the ``_task_*`` hooks, as in
     ``DroneBaseEnv``, with ``_task_target_geom(i)`` and ``_task_obs(i)`` per drone.
@@ -86,7 +120,17 @@ class FormationBaseEnv(SceneEnv):
         num_drones: int = 3,
         formation_spacing: float = 1.0,
         min_separation: float = 0.6,
+        spawn_separation: float | None = None,
+        spawn_heading_noise_deg: float | None = None,
         collision_penalty: float = 10.0,
+        proximity_distance: float = 0.9,
+        proximity_weight: float = 0.0,
+        separation_distance: float = 1.8,
+        separation_weight: float = 0.0,
+        shaping_gamma: float = 0.99,
+        wall_distance: float = 0.5,
+        wall_weight: float = 0.0,
+        geofence: float | None = None,
         obs_mode: str = "detection",
         image_size: int = 84,
         detection_noise: float = 0.0,
@@ -106,11 +150,24 @@ class FormationBaseEnv(SceneEnv):
     ):
         assert obs_mode in ("detection", "pixels", "state")
         assert formation_spacing > min_separation, "formation slots would count as collisions"
+        assert proximity_distance > min_separation
         self.num_drones = num_drones
         self.formation = formation_offsets(num_drones, formation_spacing)
         self.formation_spacing = formation_spacing
         self.min_separation = min_separation
+        self.spawn_separation = formation_spacing if spawn_separation is None else spawn_separation
+        self.spawn_heading_noise = None if spawn_heading_noise_deg is None else np.deg2rad(spawn_heading_noise_deg)
         self.collision_penalty = collision_penalty
+        self.proximity_distance = proximity_distance
+        self.proximity_weight = proximity_weight
+        assert separation_distance > min_separation
+        self.separation_distance = separation_distance
+        self.separation_weight = separation_weight
+        self.shaping_gamma = shaping_gamma
+        self._separation_potential = np.zeros(num_drones)
+        self.wall_distance = wall_distance
+        self.wall_weight = wall_weight
+        self.geofence = geofence
         self.obs_mode = obs_mode
         self.detection_noise = detection_noise
         self.detection_dropout = detection_dropout
@@ -185,9 +242,12 @@ class FormationBaseEnv(SceneEnv):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         self.step_count = 0
+        self._episode_sums = {}
+        self._drone_return = np.zeros(self.num_drones)
         mujoco.mj_resetData(self.model, self.data)
         self._task_reset(options or {})
         mujoco.mj_forward(self.model, self.data)
+        self._separation_potential = self.separation_potential()
         if self.render_mode == "human":
             self.render()
         dets = self.target_detections()
@@ -200,14 +260,28 @@ class FormationBaseEnv(SceneEnv):
         yaw = self.drone_yaw
         c, s = np.cos(yaw), np.sin(yaw)
         vz = ALTITUDE_GAIN * (self.flight_altitude - self.drone_pos[:, 2])
-        self.data.ctrl[self._ctrl_adr] = np.stack([c * vx - s * vy, s * vx + c * vy, vz, yaw_rate], axis=1)
+        world = np.stack([c * vx - s * vy, s * vx + c * vy], axis=1)
+        if self.geofence is not None:
+            # Outward speed allowed: shrinks to 0 at ``geofence`` inside the arena edge (2/s gain).
+            room = (self.arena_half_extent - self.geofence) - np.abs(self.drone_pos[:, :2])
+            outward = np.sign(world) == np.sign(self.drone_pos[:, :2])
+            world = np.where(outward, np.sign(world) * np.minimum(np.abs(world), np.maximum(2.0 * room, 0.0)), world)
+        self.data.ctrl[self._ctrl_adr] = np.column_stack([world, vz, yaw_rate])
         mujoco.mj_step(self.model, self.data, nstep=self.frame_skip)
         self.step_count += 1
 
         reward, terminated, info = self._task_step()
-        reward -= self.ctrl_cost_weight * float(np.mean(np.sum(action**2, axis=1)))
+        proximity_cost = self.proximity_cost() + self.wall_cost()
+        info["proximity_cost"] = proximity_cost
+        potential = self.separation_potential()
+        shaping = self.shaping_gamma * potential - self._separation_potential
+        self._separation_potential = potential
+        cost = self.ctrl_cost_weight * np.sum(action**2, axis=1) + proximity_cost - shaping
+        reward -= float(np.mean(cost))
+        drone_reward = info.pop("drone_reward", None)
         separation = self.min_pairwise_distance()
         info["separation"] = separation
+        info["inter_drone_distance"] = self.mean_pairwise_distance()
         if not terminated and separation < self.min_separation:
             reward -= self.collision_penalty
             terminated = True
@@ -219,8 +293,16 @@ class FormationBaseEnv(SceneEnv):
 
         if self.render_mode == "human":
             self.render()
+        if drone_reward is None:
+            drone_reward = np.full(self.num_drones, reward)
+        else:  # each drone's own task reward, control and proximity costs; the terminal penalties are shared
+            drone_reward = drone_reward - cost
+            drone_reward += reward - float(np.mean(drone_reward))
+        info["drone_reward"] = drone_reward
         dets = self.target_detections()
-        return self._get_obs(dets), reward, terminated, False, self._get_info(info, dets)
+        info = self._get_info(info, dets)
+        self._accumulate(info)
+        return self._get_obs(dets), reward, terminated, False, info
 
     def detect(self, drone: int, geom_id: int) -> np.ndarray:
         """Exact ``[visible, cx, cy, w, h]`` box of ``geom_id`` in ``drone``'s onboard camera."""
@@ -285,6 +367,36 @@ class FormationBaseEnv(SceneEnv):
         a, b = self._pairs
         return float(np.min(np.linalg.norm(xy[a] - xy[b], axis=-1), initial=np.inf))
 
+    def proximity_cost(self) -> np.ndarray:
+        """``(num_drones,)``: each drone's proximity cost this step (see the class docstring)."""
+        xy = self.drone_pos[:, :2]
+        dist = np.linalg.norm(xy[:, None] - xy[None], axis=-1)
+        np.fill_diagonal(dist, np.inf)
+        band = self.proximity_distance - self.min_separation
+        return self.proximity_weight * np.clip((self.proximity_distance - dist) / band, 0.0, 1.0).sum(axis=1)
+
+    def wall_cost(self) -> np.ndarray:
+        """``(num_drones,)``: each drone's cost for flying near the arena edge (see the class docstring)."""
+        if not self.wall_weight:
+            return np.zeros(self.num_drones)
+        depth = np.max(np.abs(self.drone_pos[:, :2]), axis=1) - (self.arena_half_extent - self.wall_distance)
+        return self.wall_weight * np.clip(depth / self.wall_distance, 0.0, 1.0)
+
+    def separation_potential(self) -> np.ndarray:
+        """``(num_drones,)``: each drone's potential for the separation shaping, minus its band measure."""
+        if not self.separation_weight:
+            return np.zeros(self.num_drones)
+        xy = self.drone_pos[:, :2]
+        dist = np.linalg.norm(xy[:, None] - xy[None], axis=-1)
+        np.fill_diagonal(dist, np.inf)
+        band = self.separation_distance - self.min_separation
+        return -self.separation_weight * np.clip((self.separation_distance - dist) / band, 0.0, 1.0).sum(axis=1)
+
+    def mean_pairwise_distance(self) -> float:
+        xy = self.drone_pos[:, :2]
+        a, b = self._pairs
+        return float(np.mean(np.linalg.norm(xy[a] - xy[b], axis=-1))) if len(a) else 0.0
+
     # --- helpers for subclasses -------------------------------------------------------
 
     def _set_drone_states(self, xy, yaw) -> None:
@@ -296,15 +408,22 @@ class FormationBaseEnv(SceneEnv):
         return self.np_random.uniform(-1.0, 1.0, size=2) * (self.arena_half_extent - margin)
 
     def _sample_separated_xy(self, margin: float = 0.5) -> np.ndarray:
-        """Random start positions, at least ``formation_spacing`` apart."""
+        """Random start positions, at least ``spawn_separation`` (default ``formation_spacing``) apart."""
         while True:
             xy = np.array([self._sample_xy(margin) for _ in range(self.num_drones)])
             dists = np.linalg.norm(xy[:, None] - xy[None], axis=-1)
-            if np.all(dists[np.triu_indices(self.num_drones, k=1)] >= self.formation_spacing):
+            if np.all(dists[np.triu_indices(self.num_drones, k=1)] >= self.spawn_separation):
                 return xy
 
-    def _sample_yaw(self) -> np.ndarray:
-        return self.np_random.uniform(-np.pi, np.pi, size=self.num_drones)
+    def _sample_yaw(self, look_at=None) -> np.ndarray:
+        """Start headings: uniform, or, with ``spawn_heading_noise_deg`` and ``look_at`` (one point per
+        drone, ``(num_drones, 2)``, given its start ``xy`` already set), each drone facing its point
+        up to that much noise, so its target starts in view."""
+        if look_at is None or self.spawn_heading_noise is None:
+            return self.np_random.uniform(-np.pi, np.pi, size=self.num_drones)
+        rel = np.asarray(look_at) - self.drone_pos[:, :2]
+        noise = self.np_random.uniform(-self.spawn_heading_noise, self.spawn_heading_noise, size=self.num_drones)
+        return np.arctan2(rel[:, 1], rel[:, 0]) + noise
 
     def _point_in_view(self, drone: int, point) -> bool:
         return point_in_view(self.model, self.data, self._onboard_cam_ids[drone], point)
@@ -333,6 +452,22 @@ class FormationBaseEnv(SceneEnv):
     def _get_info(self, info: dict[str, Any], dets: np.ndarray) -> dict[str, Any]:
         info["target_in_view"] = dets[:, 0].astype(bool)
         return info
+
+    def _accumulate(self, info: dict[str, Any]) -> None:
+        """Add this step's metrics to the running sums and report the episode means so far
+        (``mean_*``; over the whole episode once it ends), averaged over the drones. Per-drone
+        metrics also get ``mean_*_per_drone`` (one entry per drone), and ``drone_return`` is each
+        drone's return so far."""
+        self._drone_return += info["drone_reward"]
+        info["drone_return"] = self._drone_return.copy()
+        for key in EPISODE_MEANS:
+            if key in info:
+                value = np.asarray(info[key], dtype=float)
+                self._episode_sums[key] = self._episode_sums.get(key, 0.0) + value
+                mean = self._episode_sums[key] / self.step_count
+                info[f"mean_{key}"] = float(np.mean(mean))
+                if value.ndim > 0:
+                    info[f"mean_{key}_per_drone"] = mean
 
     # --- task hooks -------------------------------------------------------------------
 

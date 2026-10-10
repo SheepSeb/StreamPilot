@@ -29,6 +29,8 @@ class FormationTrackingEnv(FormationBaseEnv):
         target_speed_reversion: float = 0.5,
         target_speed_noise: float = 0.4,
         reward_scale: float = 0.3,
+        on_target_distance: float = 0.2,
+        on_target_heading_deg: float = 10.0,
         arena_half_extent: float = 5.0,
         **kwargs,
     ):
@@ -38,6 +40,8 @@ class FormationTrackingEnv(FormationBaseEnv):
         self.target_speed_reversion = target_speed_reversion
         self.target_speed_noise = target_speed_noise
         self.reward_scale = reward_scale
+        self.on_target_distance = on_target_distance
+        self.on_target_heading = np.deg2rad(on_target_heading_deg)
         self.target_half_width = 0.15
         super().__init__(arena_half_extent=arena_half_extent, **kwargs)
         # Leave room for the whole formation between the target and the arena edge.
@@ -78,6 +82,9 @@ class FormationTrackingEnv(FormationBaseEnv):
         target_xy = self.np_random.uniform(-1.0, 1.0, size=2) * self.target_half_extent
         self.data.mocap_pos[self._target] = [*target_xy, self.target_half_height]
         self._target_vel = np.zeros(3)
+        self._spawn_team(target_xy)
+
+    def _spawn_team(self, target_xy) -> None:
         # Start near the formation, roughly facing the target, so it begins in (or near) view.
         bearing = self.np_random.uniform(-np.pi, np.pi)
         distance = self.follow_distance + self.np_random.uniform(-0.5, 0.5)
@@ -112,14 +119,20 @@ class FormationTrackingEnv(FormationBaseEnv):
     def _task_step(self):
         facing = (1.0 + np.cos(self._heading_error(self._target_pos))) / 2
         # The leader's slot is on its own bearing, so its slot error is its standoff error.
-        reward = float(np.mean(np.exp(-self._slot_errors() / self.reward_scale) * facing))
-        return reward, False, self._task_info()
+        drone_reward = np.exp(-self._slot_errors() / self.reward_scale) * facing
+        info = self._task_info()
+        info["drone_reward"] = drone_reward
+        return float(np.mean(drone_reward)), False, info
 
     def _task_info(self) -> dict:
+        standoff, heading = self._standoff_error(), np.abs(self._heading_error(self._target_pos))
         return {
-            "standoff_error": self._standoff_error(),
+            "standoff_error": standoff,
             "formation_error": self._slot_errors(),
-            "heading_error": np.abs(self._heading_error(self._target_pos)),
+            "heading_error": heading,
+            # Tracking never terminates on success: a step counts when the leader holds the standoff
+            # and every drone faces the target.
+            "on_target": bool(standoff < self.on_target_distance and np.all(heading < self.on_target_heading)),
         }
 
     def goals(self):

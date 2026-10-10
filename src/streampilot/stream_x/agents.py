@@ -45,13 +45,44 @@ class MLP(nn.Module):
         return tuple(head(x) for head in self.heads)
 
 
+# softplus(0): what the std head gives while its output is zero
+DEFAULT_INIT_STD = math.log(2.0)
+
+
+def softplus_inverse(y: float) -> float:
+    return math.log(math.expm1(y))
+
+
+def std_bias(init_std: float, max_std: float | None) -> float:
+    """Bias of the std head that gives ``init_std`` while the head's weights are near zero."""
+    if max_std is None:
+        return softplus_inverse(init_std)
+    assert init_std < max_std, "--init-std must be below --max-std"
+    return math.log(init_std / (max_std - init_std))
+
+
+def to_std(pre_std: torch.Tensor, max_std: float | None) -> torch.Tensor:
+    """Standard deviation from the std head's output: softplus, or (``max_std``) a sigmoid that stays below it."""
+    return F.softplus(pre_std) if max_std is None else max_std * torch.sigmoid(pre_std)
+
+
 class Actor(MLP):
-    def __init__(self, obs_dim: int, action_dim: int, hidden_size: int = 128):
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_size: int = 128,
+        init_std: float = DEFAULT_INIT_STD,
+        bound_mean: bool = False,
+        max_std: float | None = None,
+    ):
         super().__init__(obs_dim, (action_dim, action_dim), hidden_size)
+        self.bound_mean, self.max_std = bound_mean, max_std
+        nn.init.constant_(self.heads[1].bias, std_bias(init_std, max_std))  # the std head; weights start near zero
 
     def forward(self, x):
         mu, pre_std = super().forward(x)
-        return mu, F.softplus(pre_std)
+        return (torch.tanh(mu) if self.bound_mean else mu), to_std(pre_std, self.max_std)
 
     def deterministic(self, x):
         return self(x)[0].clamp(-1.0, 1.0)
@@ -79,9 +110,12 @@ class StreamAC:
         kappa_policy: float = 3.0,
         kappa_value: float = 2.0,
         entropy_coeff: float = 0.01,
+        init_std: float = DEFAULT_INIT_STD,
+        bound_mean: bool = False,
+        max_std: float | None = None,
     ):
         self.gamma, self.entropy_coeff = gamma, entropy_coeff
-        self.actor = Actor(obs_dim, action_dim, hidden_size)
+        self.actor = Actor(obs_dim, action_dim, hidden_size, init_std, bound_mean, max_std)
         self.critic = Critic(obs_dim, hidden_size)
         self.actor_optim = ObGD(self.actor.parameters(), lr=lr, gamma=gamma, lamda=lamda, kappa=kappa_policy)
         self.critic_optim = ObGD(self.critic.parameters(), lr=lr, gamma=gamma, lamda=lamda, kappa=kappa_value)
@@ -111,7 +145,12 @@ class StreamAC:
         return delta
 
     def observe(self, obs, action, reward: float, next_obs, terminated: bool, done: bool) -> dict:
-        return {"abs_td_error": abs(self.update(obs, action, reward, next_obs, terminated, done))}
+        delta = self.update(obs, action, reward, next_obs, terminated, done)
+        return {
+            "abs_td_error": abs(delta),
+            "actor_step_scale": self.actor_optim.last_scale,
+            "critic_step_scale": self.critic_optim.last_scale,
+        }
 
     def state_dict(self) -> dict:
         return {"actor": self.actor.state_dict(), "critic": self.critic.state_dict()}
@@ -125,6 +164,20 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--kappa-policy", type=float, default=3.0)
     parser.add_argument("--kappa-value", type=float, default=2.0)
     parser.add_argument("--entropy-coeff", type=float, default=0.01)
+    parser.add_argument("--init-std", type=float, default=DEFAULT_INIT_STD, help="action standard deviation at the start")
+    parser.add_argument(
+        "--max-std",
+        type=float,
+        default=None,
+        help="cap the action standard deviation (a sigmoid instead of the softplus), so exploration cannot grow without bound",
+    )
+    parser.add_argument(
+        "--bound-mean",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="pass the policy mean through tanh, so it stays inside the action range (the environment clips actions, "
+        "so a mean beyond it only makes the policy saturate and unable to recover)",
+    )
 
 
 def make_agent(args: argparse.Namespace, obs_dim: int, action_dim: int) -> StreamAC:
@@ -138,4 +191,7 @@ def make_agent(args: argparse.Namespace, obs_dim: int, action_dim: int) -> Strea
         kappa_policy=args.kappa_policy,
         kappa_value=args.kappa_value,
         entropy_coeff=args.entropy_coeff,
+        init_std=args.init_std,
+        bound_mean=args.bound_mean,
+        max_std=args.max_std,
     )

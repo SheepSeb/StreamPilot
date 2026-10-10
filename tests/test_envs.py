@@ -9,7 +9,7 @@ from gymnasium.utils.env_checker import check_env
 import streampilot.env  # noqa: F401  (registers the environments)
 from streampilot.visualize import landing_policy, tracking_policy, waypoint_policy
 
-ENV_IDS = ["DroneWaypoint-v0", "DroneLanding-v0", "DroneTracking-v0"]
+ENV_IDS = ["DroneWaypoint-v0", "DroneLanding-v0", "DroneTracking-v0", "DroneMorphingTracking-v0"]
 OBS_MODES = ["detection", "pixels", "state"]
 
 
@@ -184,6 +184,25 @@ def test_tracking_scripted_controller_keeps_target_in_view():
         assert info["standoff_error"] < 0.3
         assert np.mean([i["target_in_view"] for i in infos]) > 0.9
         assert followed > 2 * hovered
+    env.close()
+
+
+def test_morphing_target_changes_shape_and_motion():
+    env = gym.make("DroneMorphingTracking-v0", switch_steps=(40, 60))
+    base = env.unwrapped
+    for seed in range(3):
+        followed, info, infos = rollout(env, tracking_policy, seed)
+        switches = [i for i in infos if i["switched"]]
+        assert len(infos) == 600 and "out_of_bounds" not in info, (seed, len(infos), info)
+        assert len(switches) >= 9
+        before = [infos[0], *switches[:-1]]
+        for prev, cur in zip(before, switches):
+            assert cur["shape"] != prev["shape"] and cur["motion"] != prev["motion"]
+        assert np.mean([i["target_in_view"] for i in infos]) > 0.9
+        assert np.mean([i["standoff_error"] for i in infos]) < 0.2
+        # Only the active shape is drawn, and it is the one the detector reports.
+        visible = [g for g in base._shape_geoms.values() if base.model.geom_rgba[g, 3] > 0]
+        assert visible == [base._task_target_geom()]
     env.close()
 
 
