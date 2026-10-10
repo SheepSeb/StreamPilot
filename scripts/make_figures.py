@@ -9,7 +9,7 @@ import argparse
 import importlib
 from pathlib import Path
 
-GROUPS = ["tracking", "robustness", "continual", "diagrams", "scenes"]
+GROUPS = ["tracking", "robustness", "continual", "diagrams", "scenes", "animate"]
 
 
 def group_parser(name: str):

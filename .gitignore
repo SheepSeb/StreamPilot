@@ -16,3 +16,6 @@ wheels/
 
 # Training runs
 *runs*/
+
+# Local website files
+web

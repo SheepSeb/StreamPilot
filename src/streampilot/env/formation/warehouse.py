@@ -34,22 +34,6 @@ class FormationWarehouseWaypointEnv(FormationWaypointEnv):
     def _build_scene(self, spec: mujoco.MjSpec) -> None:
         build_hall(spec, self.arena_half_extent, side_racks=True)
         super()._build_scene(spec)
-        spec.geom("target").rgba = [0.0, 0.0, 0.0, 0.0]
-        robot, w, h = spec.body("target"), self.target_half_width, self.target_half_height
-        cylinder = mujoco.mjtGeom.mjGEOM_CYLINDER
-        prop(robot, [w, w, 0.11], [0.0, 0.0, -h + 0.13], AGV_ORANGE)  # base
-        prop(robot, [w, w, 0.025], [0.0, 0.0, -h + 0.025], DARK)  # bumper
-        for x in (-1, 1):
-            for y in (-1, 1):
-                prop(robot, [0.045, 0.02], [x * (w - 0.05), y * (w - 0.02), -h + 0.045], DARK, cylinder,
-                     quat=[0.7071, 0.7071, 0.0, 0.0])
-        mast_bottom, head = -h + 0.24, h - 0.2
-        prop(robot, [0.05, 0.05, (head - mast_bottom) / 2], [0.0, 0.0, (head + mast_bottom) / 2], STEEL)
-        for z in np.linspace(mast_bottom + 0.2, head - 0.15, 4):  # scanner cameras, both sides
-            for x in (-1, 1):
-                prop(robot, [0.02, 0.07, 0.03], [x * 0.06, 0.0, z], DARK)
-        prop(robot, [w, w, 0.2], [0.0, 0.0, h - 0.2], ROBOT)  # head
-        prop(robot, [w + 0.002, w + 0.002, 0.02], [0.0, 0.0, h - 0.33], STATUS_GREEN)
         for i in range(self.num_drones):
             post = spec.body(f"waypoint{i}")  # at flight altitude
             floor = -self.flight_altitude
@@ -69,22 +53,6 @@ class FormationWarehouseLandingEnv(FormationLandingEnv):
     def _build_scene(self, spec: mujoco.MjSpec) -> None:
         build_hall(spec, self.arena_half_extent, side_racks=True)
         super()._build_scene(spec)
-        spec.geom("target").rgba = [0.0, 0.0, 0.0, 0.0]
-        robot, w, h = spec.body("target"), self.target_half_width, self.target_half_height
-        cylinder = mujoco.mjtGeom.mjGEOM_CYLINDER
-        prop(robot, [w, w, 0.11], [0.0, 0.0, -h + 0.13], AGV_ORANGE)  # base
-        prop(robot, [w, w, 0.025], [0.0, 0.0, -h + 0.025], DARK)  # bumper
-        for x in (-1, 1):
-            for y in (-1, 1):
-                prop(robot, [0.045, 0.02], [x * (w - 0.05), y * (w - 0.02), -h + 0.045], DARK, cylinder,
-                     quat=[0.7071, 0.7071, 0.0, 0.0])
-        mast_bottom, head = -h + 0.24, h - 0.2
-        prop(robot, [0.05, 0.05, (head - mast_bottom) / 2], [0.0, 0.0, (head + mast_bottom) / 2], STEEL)
-        for z in np.linspace(mast_bottom + 0.2, head - 0.15, 4):  # scanner cameras, both sides
-            for x in (-1, 1):
-                prop(robot, [0.02, 0.07, 0.03], [x * 0.06, 0.0, z], DARK)
-        prop(robot, [w, w, 0.2], [0.0, 0.0, h - 0.2], ROBOT)  # head
-        prop(robot, [w + 0.002, w + 0.002, 0.02], [0.0, 0.0, h - 0.33], STATUS_GREEN)
         spec.geom("pad").rgba = [0.22, 0.23, 0.25, 1.0]
         pad, s = spec.body("pad"), self.pad_half_size
         top = self.pad_half_height + 0.001
