@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SwarmStream</title>
+  <meta name="description" content="SwarmStream: Extending Streaming Reinforcement Learning to Multi-Agent UAVs.">
+  <meta property="og:title" content="SwarmStream: Extending Streaming Reinforcement Learning to Multi-Agent UAVs">
+  <meta property="og:description" content="Two multi-agent extensions of Stream AC(λ) that learn from each transition once, without replay buffers or batch updates, evaluated on vision-based multi-UAV formation tracking.">
+  <meta property="og:image" content="static/figures/fig3_scaling.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+  <link rel="stylesheet" href="static/css/style.css">
+</head>
+<body>
+
+<header class="hero">
+  <div class="container">
+    <h1 class="title">SwarmStream</h1>
+    <p class="subtitle">Extending Streaming Reinforcement Learning to Multi-Agent UAVs</p>
+
+    <nav class="links">
+      <!-- TODO: point these at the paper and arXiv page once they are public -->
+      <a class="btn" href="#" aria-disabled="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l5 5v15H6zM14 3v5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        Paper
+      </a>
+      <a class="btn" href="#" aria-disabled="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4l16 16M20 4L4 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        arXiv
+      </a>
+      <a class="btn" href="https://github.com/SheepSeb/StreamPilot">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.69 5.39-5.25 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5z"/></svg>
+        Code
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <section class="container teaser">
+    <figure>
+      <video src="static/videos/teaser.mp4" autoplay loop muted playsinline preload="auto" aria-label="SwarmStream trailer: a team of three drones performing formation tracking, waypoints, and landing in the warehouse"></video>
+      <figcaption>
+        A team of three drones on formation tracking, waypoints, and landing in a MuJoCo warehouse, each acting only
+        on its own camera detections, and learning from each transition once, as it arrives.
+      </figcaption>
+    </figure>
+  </section>
+
+  <section class="container narrow">
+    <h2>Abstract</h2>
+    <p class="abstract">
+      Teams of drones must coordinate under tight onboard compute and memory budgets and keep adapting after
+      deployment, yet deep multi-agent reinforcement learning relies on replay buffers and large batch updates that
+      are costly on board and assume stationary data. Streaming reinforcement learning avoids both by learning from
+      each transition once, as it arrives, but has been limited to single agents. We introduce two multi-agent
+      extensions of Stream AC(λ): <strong>iStream-AC</strong>, which is fully decentralized, and
+      <strong>cStream-AC</strong>, which uses a centralized critic during training. We evaluate them on multi-UAV
+      formation tracking in a MuJoCo warehouse, where each drone acts only on camera detections of a moving target.
+      Both variants learn faster than IPPO and MAPPO and reach comparable final return. The independent critic
+      matches the centralized one, so training can remain fully decentralized. A curriculum over detection dropout
+      and noise makes the policies robust to perception errors, and across a sequence of tracking, waypoint, and
+      landing tasks, Stream AC adapts quickly and retains the plasticity to relearn after forgetting. These results
+      show that streaming learning is a practical alternative to batch methods for drone teams that must keep
+      learning on board.
+    </p>
+  </section>
+
+  <section class="container narrow">
+    <h2>Highlights</h2>
+    <div class="stats">
+      <div class="stat"><span class="num">340</span><span class="lbl">return after only 100k steps for iStream-AC at every team size, vs &lt; 150 for IPPO and MAPPO with N ≥ 2</span></div>
+      <div class="stat"><span class="num">441.8</span><span class="lbl">final return with 5 drones, vs 409.2 for IPPO and 349.9 for MAPPO</span></div>
+      <div class="stat"><span class="num">&lt; 2.6 ms</span><span class="lbl">worst-case update on a CPU, where PPO's batch updates spike to 45 ms of the 50 ms control period</span></div>
+    </div>
+  </section>
+
+  <section class="container">
+    <h2 class="center">Environment</h2>
+    <div class="narrow-text">
+      <p>
+        A multi-UAV target-tracking environment in MuJoCo with the Skydio X2 drone, mimicking a factory where drones
+        track a moving robot. Each drone takes a normalized action \([v_x, v_y, \dot\psi] \in [-1, 1]^3\), scaled to a
+        maximum speed of 2 m/s, at a fixed altitude. Its observation is only the camera detection of the target,
+        \([\text{visible}, c_x, c_y, w, h]\), so the policy learns control, not perception.
+      </p>
+    </div>
+    <figure class="figure">
+      <img src="static/images/figures/setup_combined.png" alt="(a) Warehouse with three drones tracking a robot. (b) Close-up of the team. (c–e) Onboard views of each drone with the detection box. (f) The leader's view with noise, the true box dotted. (g) The leader's view with dropout: no detection." loading="lazy">
+      <figcaption>The warehouse with \(N = 3\) drones (a, b) and each drone's onboard view with its detection of the target (c–e). Detections can be corrupted by noise (f) or dropped (g).</figcaption>
+    </figure>
+    <div class="narrow-text">
+      <p>Each drone \(i\) receives a reward \(r_i\), and the team the shared reward \(R\):</p>
+      <div class="eq">\[
+        r_i = \exp\!\Big(-\frac{d_i}{0.3}\Big)\,\frac{1+\cos\psi_i}{2}, \qquad
+        R = \frac{1}{N}\sum_{i=1}^{N}\big(r_i - 0.01\,\lVert \mathbf{a}_i \rVert^2\big)
+      \]</div>
+      <p>
+        \(d_i\) is the distance to the drone's desired position (1.5 m from the target for the leader) and
+        \(\psi_i\) the angle between its heading and the target, so a drone is only rewarded when it also faces
+        the target, its only sensor. A collision (drones closer than 0.6 m) or leaving the arena gives \(R = -10\)
+        and ends the episode.
+      </p>
+    </div>
+  </section>
+
+  <section class="container">
+    <h2 class="center">Method</h2>
+    <figure class="figure">
+      <img src="static/images/figures/algos.png" alt="iStream-AC: each drone has its own actor and its own critic on its own input. cStream-AC: each drone has its own actor, and one critic sees the joint input of all drones." loading="lazy">
+      <figcaption>Each drone has its own actor; the variants differ only in the critic: one per drone (a) or one on the joint state \(s\) (b).</figcaption>
+    </figure>
+    <div class="narrow-text">
+      <p>
+        Both variants share the same actors and optimizer. Each drone's input \(x_i\) stacks its last 4 observations
+        and its previous action. Actors are Gaussian MLPs with two hidden layers of 128 units and sparse LeCun-uniform
+        initialization, trained with the Stream AC(λ) defaults, without tuning. They differ only in the TD error used
+        to update the critic:
+      </p>
+      <div class="eq">\[
+        \underbrace{\delta_i = \tilde R_t + \gamma V_i(x_i') - V_i(x_i)}_{\text{iStream-AC}}, \qquad
+        \underbrace{\delta = \tilde R_t + \gamma V(s') - V(s)}_{\text{cStream-AC}}
+      \]</div>
+      <div class="cards two">
+        <div class="card">
+          <h3>iStream-AC</h3>
+          <p>Fully decentralized. Each drone treats its teammates as part of the environment and learns its own critic
+            \(V_i(x_i)\), so training needs only the drone's own observations and the team reward.</p>
+        </div>
+        <div class="card">
+          <h3>cStream-AC</h3>
+          <p>Centralized training, decentralized execution. A single critic \(V(s)\) takes the joint state
+            \(s = [x_1, \dots, x_N]\) and computes one team TD error. Actors still use only their own inputs.</p>
+        </div>
+      </div>
+    </div>
+    <figure class="figure spaced">
+      <img src="static/images/figures/rl_schematic.png" alt="(a) Factory escort with three drones following a mobile robot, with the leader's onboard view. (b) Top-view task geometry: formation slots, camera fields of view, and the 1.5 m standoff. (c) The streaming learning loop of each drone: observation and team reward feed a critic and actor, updated by one ObGD step per transition with no replay buffer." loading="lazy">
+      <figcaption>The task (a), its geometry (b), and the streaming learning loop each drone runs (c): every transition drives one ObGD step on the actor and critic, with no replay buffer.</figcaption>
+    </figure>
+  </section>
+
+  <section class="container">
+    <h2 class="center">Rollouts</h2>
+    <p class="narrow-text center muted">Policies of each method on the three tasks, \(N = 3\).</p>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-task="tracking" aria-selected="true">Tracking</button>
+      <button type="button" role="tab" data-task="waypoint" aria-selected="false">Waypoint</button>
+      <button type="button" role="tab" data-task="landing" aria-selected="false">Landing</button>
+    </div>
+    <div class="grid two rollouts">
+      <figure><video data-algo="istream_ac" loop muted playsinline></video><figcaption><strong>iStream-AC</strong></figcaption></figure>
+      <figure><video data-algo="cstream_ac" loop muted playsinline></video><figcaption><strong>cStream-AC</strong></figcaption></figure>
+      <figure><video data-algo="ippo" loop muted playsinline></video><figcaption><strong>IPPO</strong></figcaption></figure>
+      <figure><video data-algo="mappo" loop muted playsinline></video><figcaption><strong>MAPPO</strong></figcaption></figure>
+    </div>
+  </section>
+
+  <section class="container">
+    <h2 class="center">Scaling with team size</h2>
+    <figure class="figure">
+      <img src="static/images/figures/rl_curves.png" alt="Evaluation return over 2M team steps for N = 1, 2, 3 and 5 drones. The two streaming methods rise much faster than IPPO and MAPPO, and the gap widens as the team grows." loading="lazy">
+      <figcaption>Evaluation return during training for \(N \in \{1, 2, 3, 5\}\) drones (mean over 5 seeds, std shaded). Streaming learners rise much faster, and the gap in final return widens as the team grows.</figcaption>
+    </figure>
+    <div class="narrow-text">
+      <p>
+        Each streaming method is paired with its batch counterpart using the same critic information
+        (iStream-AC vs IPPO, cStream-AC vs MAPPO), so any difference within a pair comes from streaming versus batch
+        learning. With one drone all methods converge to similar returns (474–482). As the team grows, each drone
+        must account for teammates that are still learning, and streaming updates, which always use the most recent
+        transition, respond to teammates' current behavior rather than stale data.
+      </p>
+      <div class="table-wrap">
+        <table class="results">
+          <caption>Final evaluation on formation tracking (mean ± std over 5 seeds, 100 episodes each; best per N in bold).</caption>
+          <thead>
+            <tr><th>N</th><th>Method</th><th>Return ↑</th><th>Form. [m] ↓</th><th>Head. [°] ↓</th><th>Stand. [m] ↓</th></tr>
+          </thead>
+          <tbody>
+            <tr class="group"><td rowspan="4">2</td><td>iStream-AC</td><td><b>468.0 ± 4.5</b></td><td><b>.019 ± .003</b></td><td>5.3 ± 1.7</td><td><b>.016 ± .004</b></td></tr>
+            <tr><td>cStream-AC</td><td>466.5 ± 2.1</td><td>.020 ± .002</td><td>6.7 ± 0.7</td><td><b>.016 ± .001</b></td></tr>
+            <tr><td>IPPO</td><td>447.1 ± 8.1</td><td>.031 ± .005</td><td><b>4.9 ± 2.8</b></td><td>.019 ± .003</td></tr>
+            <tr><td>MAPPO</td><td>409.6 ± 102.6</td><td>.355 ± .741</td><td>15.2 ± 29.2</td><td>.019 ± .007</td></tr>
+            <tr class="group"><td rowspan="4">3</td><td>iStream-AC</td><td><b>464.1 ± 3.7</b></td><td><b>.021 ± .002</b></td><td>6.1 ± 2.2</td><td><b>.019 ± .003</b></td></tr>
+            <tr><td>cStream-AC</td><td>455.5 ± 7.5</td><td>.027 ± .005</td><td>6.3 ± 1.8</td><td><b>.019 ± .004</b></td></tr>
+            <tr><td>IPPO</td><td>436.6 ± 5.4</td><td>.040 ± .002</td><td>3.9 ± 1.6</td><td>.023 ± .004</td></tr>
+            <tr><td>MAPPO</td><td>444.0 ± 4.4</td><td>.033 ± .003</td><td><b>2.1 ± 0.6</b></td><td>.021 ± .002</td></tr>
+            <tr class="group"><td rowspan="4">5</td><td>iStream-AC</td><td><b>441.8 ± 7.3</b></td><td><b>.033 ± .005</b></td><td>14.0 ± 1.1</td><td><b>.019 ± .002</b></td></tr>
+            <tr><td>cStream-AC</td><td>433.8 ± 10.7</td><td>.041 ± .006</td><td>7.8 ± 4.9</td><td>.025 ± .004</td></tr>
+            <tr><td>IPPO</td><td>409.2 ± 7.6</td><td>.061 ± .007</td><td><b>3.3 ± 1.2</b></td><td>.042 ± .010</td></tr>
+            <tr><td>MAPPO</td><td>349.9 ± 75.5</td><td>.404 ± .543</td><td>7.7 ± 2.5</td><td>.038 ± .014</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        The independent critic matches the centralized one at every team size, with lower variance across seeds:
+        a team trained with iStream-AC needs no communication beyond the shared reward. Collisions and
+        out-of-bounds events occur in at most 0.2% of episodes.
+      </p>
+    </div>
+    <figure class="figure spaced">
+      <img src="static/images/figures/rl_aggregate.png" alt="Aggregate normalized return per method: median, interquartile mean, mean, and optimality gap. iStream-AC and cStream-AC score highest and have the smallest optimality gap; MAPPO has the widest interval." loading="lazy">
+      <figcaption>Aggregate normalized return: median, interquartile mean (IQM), mean, and optimality gap.</figcaption>
+    </figure>
+  </section>
+
+  <section class="container">
+    <h2 class="center">Robustness to perception errors</h2>
+    <div class="narrow-text">
+      <p>
+        Policies act only on detections, so detector errors propagate directly to the controls. We corrupt each
+        drone's detection at every step: with dropout probability \(p\) it is replaced by zeros, and with noise level
+        \(\sigma\) Gaussian noise is added to the box.
+      </p>
+    </div>
+    <div class="grid three onboard">
+      <figure>
+        <img src="static/images/onboard_clean.png" alt="Onboard view with a clean detection box around the target." loading="lazy">
+        <figcaption>Clean</figcaption>
+      </figure>
+      <figure>
+        <img src="static/images/onboard_noise.png" alt="Onboard view with a noisy detection box shifted from the true one." loading="lazy">
+        <figcaption>Noise σ = 0.3</figcaption>
+      </figure>
+      <figure>
+        <img src="static/images/onboard_dropout.png" alt="Onboard view with no detection." loading="lazy">
+        <figcaption>Dropout</figcaption>
+      </figure>
+    </div>
+    <figure class="figure spaced">
+      <img src="static/images/figures/robustness_curves.png" alt="Normalized return against dropout, noise, and both, for policies trained clean (top) and with a curriculum (bottom). Clean policies collapse quickly; curriculum policies degrade gracefully." loading="lazy">
+      <figcaption>Normalized return under dropout only (a), noise only (b), and both (c), for clean (top) and curriculum (bottom) training. The shaded band is the curriculum range.</figcaption>
+    </figure>
+    <div class="narrow-text">
+      <p>
+        Policies trained on perfect detections are fragile: they perform well without corruption (0.87–0.93) but
+        degrade quickly. A curriculum that raises dropout and noise linearly to 0.3 costs some clean performance but
+        makes every method robust: at \(p = \sigma = 0.3\), curriculum policies reach 0.41–0.45, versus at most 0.06
+        with clean training, and Stream AC still reaches about 0.5 at \(p = 0.5\), beyond the training range.
+      </p>
+      <details>
+        <summary>Full dropout × noise grid</summary>
+        <figure class="figure">
+          <img src="static/images/figures/robustness_grid.png" alt="Heatmaps of normalized return over the full 7 by 7 grid of dropout and noise for each method, trained clean (top) and with the curriculum (bottom)." loading="lazy">
+          <figcaption>Normalized return over the grid of dropout \(p\) and noise \(\sigma\), averaged over 3 seeds.</figcaption>
+        </figure>
+      </details>
+    </div>
+  </section>
+
+  <section class="container">
+    <h2 class="center">Continual learning</h2>
+    <div class="grid three">
+      <figure>
+        <img src="static/images/continual_tracking.gif" alt="Three drones tracking a moving robot in formation." loading="lazy">
+        <figcaption><strong>Tracking.</strong> Follow the moving robot in formation, facing it.</figcaption>
+      </figure>
+      <figure>
+        <img src="static/images/continual_waypoint.gif" alt="Three drones flying to goals arranged in the formation shape." loading="lazy">
+        <figcaption><strong>Waypoint.</strong> Fly to goals arranged in the formation shape, renewed once all arrive.</figcaption>
+      </figure>
+      <figure>
+        <img src="static/images/continual_landing.gif" alt="Three drones hovering in an arc facing a pad, then landing." loading="lazy">
+        <figcaption><strong>Landing.</strong> Hover in an arc facing a pad, then land.</figcaption>
+      </figure>
+    </div>
+    <figure class="figure spaced">
+      <img src="static/images/figures/continual_sequence.png" alt="Normalized evaluation return over a sequence of four tasks: tracking, waypoint, landing, and tracking again. Stream AC adapts quickly to waypoint and relearns tracking within 50k steps." loading="lazy">
+      <figcaption>Normalized evaluation return over the task sequence, 500k team steps per task (mean over 3 seeds, std shaded). Vertical lines mark task switches.</figcaption>
+    </figure>
+    <div class="narrow-text">
+      <p>
+        Three drones train on tracking, waypoint, landing, then tracking again, with networks and observation
+        statistics carried across switches. Both Stream AC variants nearly reach full return on waypoint, while IPPO
+        and MAPPO stay below 0.5. When tracking returns, every method starts near zero, but iStream-AC is back to 0.6
+        within 50k steps: Stream AC keeps the plasticity to relearn after forgetting. Landing remains hard, and
+        iStream-AC collapses there.
+      </p>
+    </div>
+    <figure class="figure spaced">
+      <img src="static/images/figures/continual_matrix.png" alt="Probe score on tracking, waypoint and landing after each training phase, for each method. Scores are high on the task just trained and near zero on earlier ones." loading="lazy">
+      <figcaption>Probe score on each task (columns) after each training phase (rows); outlined cells are the task just trained.</figcaption>
+    </figure>
+  </section>
+
+  <section class="container narrow">
+    <h2>Compute</h2>
+    <p>
+      Measured on a Ryzen 7 3700X CPU, since onboard drone computers typically lack a GPU. Both learners use similar
+      memory (≈ 0.8–1.1 MiB), but Stream AC needs no buffer. PPO is faster on average (0.43 vs 1.5 ms per step),
+      yet its batch updates spike to 45 ms, 90% of the 50 ms control period, while Stream AC stays below 2.6 ms.
+    </p>
+    <p class="muted">
+      Limitations: evaluation is in simulation with ground-truth detections, iStream-AC fails on landing, and
+      forgetting across tasks remains. Future work will address these on real drones with an onboard detector.
+    </p>
+  </section>
+
+</main>
+
+<dialog id="lightbox" aria-label="Enlarged media">
+  <button type="button" class="lightbox-close" aria-label="Close">×</button>
+  <div class="lightbox-body"></div>
+</dialog>
+
+<footer>
+  <div class="container">
+    <p>
+      Built on <a href="https://arxiv.org/abs/2410.14606">Stream AC(λ)</a> (Elsayed et al.), simulated in
+      <a href="https://mujoco.org">MuJoCo</a> with the Skydio X2 from MuJoCo Menagerie.
+      Page layout inspired by the <a href="https://nerfies.github.io">Nerfies</a> project page.
+    </p>
+  </div>
+</footer>
+
+<script>
+  // Rollout tabs: load the selected task's videos (static/videos/TASK_ALGO.mp4) and play them.
+  var tabs = document.querySelectorAll('.tabs [data-task]');
+  var rollouts = document.querySelectorAll('.rollouts video');
+  function showTask(task) {
+    tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.task === task)); });
+    rollouts.forEach(function (v) {
+      v.src = 'static/videos/' + task + '_' + v.dataset.algo + '.mp4';
+      v.play().catch(function () {});
+    });
+  }
+  tabs.forEach(function (t) { t.addEventListener('click', function () { showTask(t.dataset.task); }); });
+  showTask('tracking');
+
+  // Lightbox: click any image or video to view it larger; click outside, × or Esc to close.
+  var lightbox = document.getElementById('lightbox');
+  var lightboxBody = lightbox.querySelector('.lightbox-body');
+  document.querySelectorAll('main img, main video').forEach(function (el) {
+    el.classList.add('zoomable');
+    el.addEventListener('click', function () {
+      var big;
+      if (el.tagName === 'VIDEO') {
+        big = document.createElement('video');
+        big.src = el.currentSrc || el.src;
+        big.currentTime = el.currentTime;
+        big.autoplay = big.loop = big.muted = big.playsInline = big.controls = true;
+      } else {
+        big = document.createElement('img');
+        big.src = el.currentSrc || el.src;
+        big.alt = el.alt;
+      }
+      lightboxBody.replaceChildren(big);
+      lightbox.showModal();
+    });
+  });
+  lightbox.addEventListener('click', function (e) {
+    if (e.target === lightbox || e.target.classList.contains('lightbox-close')) lightbox.close();
+  });
+  lightbox.addEventListener('close', function () { lightboxBody.replaceChildren(); });
+
+  window.addEventListener('DOMContentLoaded', function () {
+    renderMathInElement(document.body, {
+      delimiters: [{ left: '\\[', right: '\\]', display: true }, { left: '\\(', right: '\\)', display: false }]
+    });
+  });
+</script>
+</body>
+</html>
