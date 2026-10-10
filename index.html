@@ -72,6 +72,25 @@
     </p>
   </section>
 
+  <section class="container">
+    <h2 class="center">Three tasks, four learners</h2>
+    <p class="narrow-text center muted">Each panel compares iStream-AC, cStream-AC, IPPO and MAPPO on the same task, with three drones.</p>
+    <div class="grid three">
+      <figure>
+        <img src="static/images/continual_tracking.gif" alt="Tracking: four panels, one per method, each with three drones following a moving robot.">
+        <figcaption><strong>Tracking.</strong> Follow the moving robot in formation, facing it.</figcaption>
+      </figure>
+      <figure>
+        <img src="static/images/continual_waypoint.gif" alt="Waypoint: four panels, one per method, each with three drones flying to their goals.">
+        <figcaption><strong>Waypoint.</strong> Fly to goals arranged in the formation shape, renewed once all arrive.</figcaption>
+      </figure>
+      <figure>
+        <img src="static/images/continual_landing.gif" alt="Landing: four panels, one per method, each with three drones lining up at a pad and landing.">
+        <figcaption><strong>Landing.</strong> Hover in an arc facing a pad, then land.</figcaption>
+      </figure>
+    </div>
+  </section>
+
   <section class="container narrow">
     <h2>Highlights</h2>
     <div class="stats">
@@ -256,20 +275,6 @@
 
   <section class="container">
     <h2 class="center">Continual learning</h2>
-    <div class="grid three">
-      <figure>
-        <img src="static/images/continual_tracking.gif" alt="Three drones tracking a moving robot in formation." loading="lazy">
-        <figcaption><strong>Tracking.</strong> Follow the moving robot in formation, facing it.</figcaption>
-      </figure>
-      <figure>
-        <img src="static/images/continual_waypoint.gif" alt="Three drones flying to goals arranged in the formation shape." loading="lazy">
-        <figcaption><strong>Waypoint.</strong> Fly to goals arranged in the formation shape, renewed once all arrive.</figcaption>
-      </figure>
-      <figure>
-        <img src="static/images/continual_landing.gif" alt="Three drones hovering in an arc facing a pad, then landing." loading="lazy">
-        <figcaption><strong>Landing.</strong> Hover in an arc facing a pad, then land.</figcaption>
-      </figure>
-    </div>
     <figure class="figure spaced">
       <img src="static/images/figures/continual_sequence.png" alt="Normalized evaluation return over a sequence of four tasks: tracking, waypoint, landing, and tracking again. Stream AC adapts quickly to waypoint and relearns tracking within 50k steps." loading="lazy">
       <figcaption>Normalized evaluation return over the task sequence, 500k team steps per task (mean over 3 seeds, std shaded). Vertical lines mark task switches.</figcaption>
