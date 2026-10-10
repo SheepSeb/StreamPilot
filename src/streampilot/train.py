@@ -39,6 +39,10 @@ TASKS = {
     "landing": "DroneLanding-v0",
     "tracking": "DroneTracking-v0",
     "morphing": "DroneMorphingTracking-v0",
+    "warehouse-waypoint": "DroneWarehouseWaypoint-v0",
+    "warehouse-landing": "DroneWarehouseLanding-v0",
+    "warehouse-tracking": "DroneWarehouseTracking-v0",
+    "warehouse-morphing": "DroneWarehouseMorphingTracking-v0",
 }
 # Each module provides NORMALIZE, add_args(parser), make_agent(args, obs_dim, action_dim) and Actor.
 # Agents provide act(obs), observe(obs, action, reward, next_obs, terminated, done) -> metrics and

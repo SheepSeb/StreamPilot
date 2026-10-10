@@ -16,12 +16,14 @@ import streampilot.env  # noqa: F401
 from streampilot.visualize import FORMATION_POLICIES, SCRIPTED_POLICIES, draw_detection
 
 OUT = Path(__file__).resolve().parent
-TASKS = {"waypoint": "DroneWaypoint-v0", "landing": "DroneLanding-v0", "tracking": "DroneTracking-v0"}
-FORMATION_TASKS = {
-    "formation-waypoint": "DroneFormationWaypoint-v0",
-    "formation-landing": "DroneFormationLanding-v0",
-    "formation-tracking": "DroneFormationTracking-v0",
+# In the warehouse (visual only: the same tasks as the plain ones). The names pick the scripted controllers.
+TASKS = {"waypoint": "DroneWarehouseWaypoint-v0", "landing": "DroneWarehouseLanding-v0", "tracking": "DroneWarehouseTracking-v0"}
+FORMATION_TASKS = {  # in the warehouse (visual only: the same tasks as the plain formation-* ones)
+    "formation-warehouse-waypoint": "DroneFormationWarehouseWaypoint-v0",
+    "formation-warehouse-landing": "DroneFormationWarehouseLanding-v0",
+    "formation-warehouse-tracking": "DroneFormationWarehouseTracking-v0",
 }
+FORMATION_SIZE = (400, 300)
 INSET = 110
 FORMATION_INSET = 90
 RENDER_SIZE = 320
@@ -77,9 +79,9 @@ def render_formation_task(name: str, env_id: str, seed: int = 0, max_steps: int 
         env_id,
         obs_mode="detection",
         render_mode="rgb_array",
-        camera="overview",
-        width=RENDER_SIZE,
-        height=RENDER_SIZE,
+        camera="hall",
+        width=FORMATION_SIZE[0],
+        height=FORMATION_SIZE[1],
         num_drones=num_drones,
     )
     base = env.unwrapped
@@ -129,7 +131,7 @@ if __name__ == "__main__":
     # Switch more often than the default 4-8 s so one short GIF shows several shapes and motions.
     frames, _ = render_task(
         "morphing",
-        "DroneMorphingTracking-v0",
+        "DroneWarehouseMorphingTracking-v0",
         max_steps=300,
         switch_steps=(50, 70),
         label=lambda info: f"{info['shape']} / {info['motion']}",
@@ -138,4 +140,4 @@ if __name__ == "__main__":
 
     for name, env_id in FORMATION_TASKS.items():
         frames = render_formation_task(name, env_id)
-        save_gif(frames, OUT / f"{name.replace('-', '_')}.gif")
+        save_gif(frames, OUT / f"{name.replace('-warehouse', '').replace('-', '_')}.gif")

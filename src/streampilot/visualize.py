@@ -31,6 +31,10 @@ TASKS = {
     "landing": "DroneLanding-v0",
     "tracking": "DroneTracking-v0",
     "morphing": "DroneMorphingTracking-v0",
+    "warehouse-waypoint": "DroneWarehouseWaypoint-v0",
+    "warehouse-landing": "DroneWarehouseLanding-v0",
+    "warehouse-tracking": "DroneWarehouseTracking-v0",
+    "warehouse-morphing": "DroneWarehouseMorphingTracking-v0",
 }
 FORMATION_TASKS = {
     "formation-waypoint": "DroneFormationWaypoint-v0",
@@ -136,6 +140,10 @@ SCRIPTED_POLICIES = {
     "landing": landing_policy,
     "tracking": tracking_policy,
     "morphing": tracking_policy,
+    "warehouse-waypoint": waypoint_policy,
+    "warehouse-landing": landing_policy,
+    "warehouse-tracking": tracking_policy,
+    "warehouse-morphing": tracking_policy,
 }
 FORMATION_POLICIES = {
     "formation-waypoint": formation_policy,
