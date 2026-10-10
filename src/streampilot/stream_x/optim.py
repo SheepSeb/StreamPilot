@@ -44,7 +44,7 @@ def _batched_obgd_step(params, trace, grads, delta, decay, lr, kappa):
     trace.add_(torch.cat([g.flatten(1) for g in grads], dim=1))
     z_sum = trace.abs().sum(1)  # (n,): each learner's ||z||_1
     bound = lr * kappa * delta.abs().clamp(min=1.0) * z_sum
-    step_size = torch.where(bound > 1.0, lr / bound, torch.full_like(bound, lr))
+    step_size = torch.where(bound > 1.0, lr / bound, torch.zeros_like(bound) + lr)
     update = trace * (-step_size * delta).unsqueeze(1)
     for p, u in zip(params, update.split([q[0].numel() for q in params], dim=1)):
         p.add_(u.reshape(p.shape))
@@ -77,7 +77,8 @@ class BatchedObGD(torch.optim.Optimizer):
             params = group["params"]
             self.last_scale = self._core(
                 params, group["_trace"], [p.grad for p in params], delta,
-                group["gamma"] * group["lamda"], group["lr"], group["kappa"],
+                # lr and kappa as tensors, so a step-size schedule does not recompile the fused step
+                group["gamma"] * group["lamda"], torch.tensor(group["lr"]), torch.tensor(group["kappa"]),
             )  # fmt: skip
             if reset:
                 group["_trace"].zero_()

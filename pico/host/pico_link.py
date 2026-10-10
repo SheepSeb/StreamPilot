@@ -203,6 +203,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Check a flashed Pico: ping, init, and time training steps.")
     parser.add_argument("port", help="e.g. /dev/ttyUSB0")
     parser.add_argument("--baud", type=int, default=921600)
+    parser.add_argument("--obs-dim", type=int, default=5, help="12: one drone's row in the formation tasks")
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--steps", type=int, default=500)
     args = parser.parse_args()
@@ -210,16 +211,18 @@ if __name__ == "__main__":
     agent = PicoAgent(SerialTransport(args.port, args.baud))
     version, arena = agent.ping()
     print(f"ping ok: protocol v{version}, arena {arena // 1024} KB")
-    agent.init(obs_dim=5, action_dim=3, hidden_size=args.hidden_size)
+    agent.init(obs_dim=args.obs_dim, action_dim=3, hidden_size=args.hidden_size)
     print(f"init ok: {agent.n_actor + agent.n_critic} parameters, {agent.in_dim} input features")
     rng = np.random.default_rng(0)
-    agent.reset(rng.random(5))
+    agent.reset(rng.random(args.obs_dim))
     update_us, start = [], time.perf_counter()
     for t in range(args.steps):
-        _, us, action = agent.step(rng.random(5), float(rng.normal()), False, t % 100 == 99)
+        _, us, action = agent.step(rng.random(args.obs_dim), float(rng.normal()), False, t % 100 == 99)
         update_us.append(us)
         if action is None:
-            agent.reset(rng.random(5))
+            agent.reset(rng.random(args.obs_dim))
     wall = (time.perf_counter() - start) / args.steps * 1000
-    print(f"{args.steps} steps: update on the Pico {np.mean(update_us) / 1000:.2f} ms, "
+    ms = np.asarray(update_us) / 1000
+    print(f"{args.steps} steps: update on the Pico {ms.mean():.2f} ms mean, {np.median(ms):.2f} median, "
+          f"{np.percentile(ms, 99):.2f} p99, {ms.max():.2f} max; "
           f"round trip {wall:.2f} ms/step ({1000 / wall:.0f} steps/s)")

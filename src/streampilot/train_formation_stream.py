@@ -19,7 +19,9 @@ the end. Watch a checkpoint with ``uv run streampilot TASK --policy RUN_DIR/fina
 """
 
 import argparse
+import json
 import os
+import shutil
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -105,6 +107,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=2_000_000, help="team steps")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--obs-mode", choices=["detection", "state"], default="detection")
+    parser.add_argument("--env-kwargs", type=json.loads, default={}, help="JSON, extra keyword arguments for the environment")
     parser.add_argument("--frames", type=int, default=4, help="observations stacked into each drone's input")
     parser.add_argument("--detection-noise", type=float, default=0.0)
     parser.add_argument("--detection-dropout", type=float, default=0.0)
@@ -115,6 +118,13 @@ def parse_args() -> argparse.Namespace:
         help="ramp the detection dropout and noise linearly from 0 to --detection-dropout/--detection-noise "
         "over this fraction of the steps, then hold them (0: no curriculum, the full levels from the start). "
         "Evaluations always use the full levels",
+    )
+    parser.add_argument(
+        "--step-scale-end",
+        type=float,
+        default=None,
+        help="anneal every learner's effective step size linearly from 1x to this factor over the run (default: "
+        "constant). Stream AC learns fast but can unlearn a working policy later; smaller steps late keep it",
     )
     parser.add_argument("--out", type=Path, default=None, help="default: runs/ALGO_TASK[_Nd]_seedSEED (ALGO: istream_ac or cstream_ac)")
     parser.add_argument("--project", default="streampilot", help="Trackio project")
@@ -136,7 +146,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     logger = RunLog(out)
 
-    env_kwargs = {"num_drones": args.drones}
+    env_kwargs = {"num_drones": args.drones, **args.env_kwargs}
     if args.obs_mode == "detection":
         env_kwargs |= {"detection_noise": args.detection_noise, "detection_dropout": args.detection_dropout}
     config = {
@@ -147,6 +157,7 @@ def main() -> None:
         "num_frames": args.frames,
         "hidden_size": args.hidden_size,
         "gamma": args.gamma,
+        "bound_mean": args.bound_mean,
         "curriculum_fraction": args.curriculum_fraction,
     }
     env = make_env(config)
@@ -164,6 +175,7 @@ def main() -> None:
         kappa_policy=args.kappa_policy,
         kappa_value=args.kappa_value,
         entropy_coeff=args.entropy_coeff,
+        init_std=args.init_std, bound_mean=args.bound_mean, max_std=args.max_std,
     )
 
     if args.compile:
@@ -182,7 +194,10 @@ def main() -> None:
     ramp = args.curriculum_fraction * args.steps
     obs, _ = env.reset(seed=args.seed)
     team.reset(obs)
+    best = (-np.inf, -np.inf)  # (success rate, return) of the best evaluation so far
     for step in range(1, args.steps + 1):
+        if args.step_scale_end is not None:
+            team.set_step_scale(1.0 + (args.step_scale_end - 1.0) * step / args.steps)
         if ramp > 0:  # the curriculum: the detection degrades from clean to the full levels
             scale = min(step / ramp, 1.0)
             env.unwrapped.detection_dropout = scale * args.detection_dropout
@@ -236,7 +251,12 @@ def main() -> None:
         if step % args.eval_every == 0:
             t0 = time.perf_counter()
             save_checkpoint(out / "latest.pt", config, team, env)
-            log_eval(logger, out / "latest.pt", config, args.eval_episodes, step, compute(t0))
+            result = log_eval(logger, out / "latest.pt", config, args.eval_episodes, step, compute(t0))
+            # best.pt: the best evaluation so far (by success, then return), kept if the policy degrades later
+            score = (result.get("eval/is_success", 0.0), result["eval/return"])
+            if score > best:
+                best = score
+                shutil.copy(out / "latest.pt", out / "best.pt")
             eval_seconds += time.perf_counter() - t0
 
     save_checkpoint(out / "final.pt", config, team, env)

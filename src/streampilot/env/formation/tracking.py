@@ -82,6 +82,9 @@ class FormationTrackingEnv(FormationBaseEnv):
         target_xy = self.np_random.uniform(-1.0, 1.0, size=2) * self.target_half_extent
         self.data.mocap_pos[self._target] = [*target_xy, self.target_half_height]
         self._target_vel = np.zeros(3)
+        self._spawn_team(target_xy)
+
+    def _spawn_team(self, target_xy) -> None:
         # Start near the formation, roughly facing the target, so it begins in (or near) view.
         bearing = self.np_random.uniform(-np.pi, np.pi)
         distance = self.follow_distance + self.np_random.uniform(-0.5, 0.5)

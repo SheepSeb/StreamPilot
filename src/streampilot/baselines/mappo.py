@@ -88,6 +88,7 @@ class MAPPO:
         vf_coef: float = 0.5,
         max_grad_norm: float = 0.5,
         target_kl: float | None = None,
+        init_std: float = 1.0,
         device: str | torch.device = "cpu",
     ):
         self.gamma, self.gae_lambda = gamma, gae_lambda
@@ -96,7 +97,7 @@ class MAPPO:
         self.max_grad_norm, self.target_kl = max_grad_norm, target_kl
         self.device = torch.device(device)
 
-        self.actor = Actor(actor_dim, action_dim, hidden_size).to(self.device)
+        self.actor = Actor(actor_dim, action_dim, hidden_size, init_std).to(self.device)
         self.critic = mlp(critic_dim, 1, critic_hidden_size, out_std=1.0).to(self.device)
         self._params = [*self.actor.parameters(), *self.critic.parameters()]
         # Fused Adam: one kernel for all the parameters instead of several per tensor.
@@ -248,6 +249,7 @@ def add_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--vf-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
     parser.add_argument("--target-kl", type=float, default=None, help="stop the epochs early above this KL")
+    parser.add_argument("--init-std", type=float, default=1.0, help="action standard deviation at the start")
 
 
 def make_agent(
@@ -274,5 +276,6 @@ def make_agent(
         vf_coef=args.vf_coef,
         max_grad_norm=args.max_grad_norm,
         target_kl=args.target_kl,
+        init_std=args.init_std,
         device=device,
     )

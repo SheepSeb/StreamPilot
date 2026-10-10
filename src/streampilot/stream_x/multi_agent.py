@@ -30,7 +30,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
 
-from streampilot.stream_x.agents import Critic, sparse_init_
+from streampilot.stream_x.agents import DEFAULT_INIT_STD, Critic, sparse_init_, std_bias, to_std
 from streampilot.stream_x.optim import BatchedObGD, ObGD
 from streampilot.stream_x.wrappers import ObservationHistory, RunningMeanStd
 
@@ -89,8 +89,12 @@ class _StreamTeam:
         kappa_policy: float,
         entropy_coeff: float,
         num_critics: int,
+        init_std: float,
+        bound_mean: bool,
+        max_std: float | None,
     ):
-        self.num_drones, self.gamma, self.entropy_coeff = num_drones, gamma, entropy_coeff
+        self.num_drones, self.gamma, self.entropy_coeff, self.init_std = num_drones, gamma, entropy_coeff, init_std
+        self.bound_mean, self.max_std = bound_mean, max_std
         # Network updates per team step: one per actor (one per drone) and one per critic.
         self.updates_per_step = num_drones + num_critics
         self.histories = [ObservationHistory(obs_dim, action_dim, num_frames) for _ in range(num_drones)]
@@ -99,6 +103,7 @@ class _StreamTeam:
         self.return_stats = RunningMeanStd((num_critics,))  # one reward scale per critic
         self._return = np.zeros(num_critics)
         self.actor = BatchedMLP(num_drones, self.dim, (action_dim, action_dim), hidden_size)
+        nn.init.constant_(self.actor.heads[1].bias, std_bias(init_std, max_std))
         self.actor_optim = BatchedObGD(self.actor.parameters(), lr=lr, gamma=gamma, lamda=lamda, kappa=kappa_policy)
         self.features: np.ndarray | None = None  # (num_drones, dim), normalized
 
@@ -116,7 +121,8 @@ class _StreamTeam:
 
     def _policy(self, x: torch.Tensor) -> Normal:
         mu, pre_std = self.actor(x.unsqueeze(1))
-        return Normal(mu.squeeze(1), F.softplus(pre_std.squeeze(1)))
+        mu = torch.tanh(mu) if self.bound_mean else mu
+        return Normal(mu.squeeze(1), to_std(pre_std.squeeze(1), self.max_std))
 
     def compile(self) -> None:
         """Fuse the update (forward, backward, optimizer step) with ``torch.compile``: the same
@@ -125,6 +131,16 @@ class _StreamTeam:
         self.actor_optim.compile()
         if isinstance(self.critic_optim, BatchedObGD):
             self.critic_optim.compile()
+
+    def set_step_scale(self, scale: float) -> None:
+        """Scale every actor's and critic's effective step size by ``scale`` (relative to the
+        ``lr`` and ``kappa`` they were built with), for a step-size schedule. ObGD's bound is active
+        almost always here, and then the step is ``1 / (kappa |delta| ||z||_1)`` whatever ``lr`` is:
+        so ``lr`` goes up and ``kappa`` down by ``scale``, which scales the step either way."""
+        for optim in (self.actor_optim, self.critic_optim):
+            for group in optim.param_groups:
+                base = group.setdefault("_base", (group["lr"], group["kappa"]))
+                group["lr"], group["kappa"] = base[0] * scale, base[1] / scale
 
     def _push(self, actions, next_obs) -> np.ndarray:
         return self._normalize(np.stack([h.push(a, row) for h, a, row in zip(self.histories, actions, next_obs)]))
@@ -175,6 +191,7 @@ class _StreamTeam:
             for layer in [*net.hidden, *net.heads]:
                 sparse_init_(layer.weight[i])
                 layer.bias[i].zero_()
+        self.actor.heads[1].bias[i] = std_bias(self.init_std, self.max_std)
         for optim in (self.actor_optim, self.critic_optim):
             for group in optim.param_groups:
                 if "_trace" in group:
@@ -206,10 +223,13 @@ class IndependentStreamAC(_StreamTeam):
         kappa_policy: float = 3.0,
         kappa_value: float = 2.0,
         entropy_coeff: float = 0.01,
+        init_std: float = DEFAULT_INIT_STD,
+        bound_mean: bool = False,
+        max_std: float | None = None,
     ):
         super().__init__(
             num_drones, obs_dim, action_dim, num_frames, hidden_size, lr, gamma, lamda, kappa_policy, entropy_coeff,
-            num_critics=num_drones,
+            num_critics=num_drones, init_std=init_std, bound_mean=bound_mean, max_std=max_std,
         )  # fmt: skip
         self.critic = BatchedMLP(num_drones, self.dim, (1,), hidden_size)
         self.critic_optim = BatchedObGD(self.critic.parameters(), lr=lr, gamma=gamma, lamda=lamda, kappa=kappa_value)
@@ -274,10 +294,13 @@ class CentralizedStreamAC(_StreamTeam):
         kappa_policy: float = 3.0,
         kappa_value: float = 2.0,
         entropy_coeff: float = 0.01,
+        init_std: float = DEFAULT_INIT_STD,
+        bound_mean: bool = False,
+        max_std: float | None = None,
     ):
         super().__init__(
             num_drones, obs_dim, action_dim, num_frames, hidden_size, lr, gamma, lamda, kappa_policy, entropy_coeff,
-            num_critics=1,
+            num_critics=1, init_std=init_std, bound_mean=bound_mean, max_std=max_std,
         )  # fmt: skip
         self.critic = Critic(num_drones * self.dim, hidden_size)
         self.critic_optim = ObGD(self.critic.parameters(), lr=lr, gamma=gamma, lamda=lamda, kappa=kappa_value)

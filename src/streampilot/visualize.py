@@ -36,6 +36,10 @@ FORMATION_TASKS = {
     "formation-waypoint": "DroneFormationWaypoint-v0",
     "formation-landing": "DroneFormationLanding-v0",
     "formation-tracking": "DroneFormationTracking-v0",
+    "formation-factory": "DroneFormationFactory-v0",
+    "formation-warehouse-waypoint": "DroneFormationWarehouseWaypoint-v0",
+    "formation-warehouse-landing": "DroneFormationWarehouseLanding-v0",
+    "formation-warehouse-tracking": "DroneFormationWarehouseTracking-v0",
 }
 INSET_SIZE = 240
 FORMATION_INSET_SIZE = 180
@@ -137,6 +141,10 @@ FORMATION_POLICIES = {
     "formation-waypoint": formation_policy,
     "formation-landing": formation_landing_policy,
     "formation-tracking": formation_policy,
+    "formation-factory": formation_policy,
+    "formation-warehouse-waypoint": formation_policy,
+    "formation-warehouse-landing": formation_landing_policy,
+    "formation-warehouse-tracking": formation_policy,
 }
 
 
@@ -225,7 +233,9 @@ def main() -> None:
         from streampilot.policy import Policy, TeamPolicy
 
         trained = (TeamPolicy if formation else Policy).load(args.policy)
-        assert trained.config["task"] == args.task, f"checkpoint is for {trained.config['task']}"
+        # The warehouse scenes are visual only, so plain-arena checkpoints fly them as they are.
+        same_task = trained.config["task"].replace("warehouse-", "") == args.task.replace("warehouse-", "")
+        assert same_task, f"checkpoint is for {trained.config['task']}"
         if formation:
             args.drones = trained.num_drones
     elif args.policy not in ("scripted", "pid", "mpc", "random", "zero"):

@@ -1,10 +1,16 @@
-"""E2.1, task sequence: train one team on tracking, then waypoint, then landing, then tracking again,
+"""Task sequence: train one team on tracking, then waypoint, then landing, then tracking again,
 ``--steps-per-task`` team steps each, and track how well it adapts.
 
     uv run streampilot-continual --method stream --mode continue     # StreamX keeps learning
     uv run streampilot-continual --method stream --mode scratch      # StreamX, a fresh learner on each task
+    uv run streampilot-continual --method cstream --mode continue    # StreamX with a centralised critic
     uv run streampilot-continual --method mappo  --mode continue     # MAPPO fine-tuned (or --method ippo)
     uv run streampilot-continual --method stream --swap-phase 1      # also swap a drone mid-phase
+    uv run streampilot-continual --method stream --compile --step-scale-end 0.1 --restore-best
+
+Every phase keeps its best evaluation as ``best_phaseN.pt``. ``--restore-best`` rolls the learner back
+to it at the end of the phase (before the probes and the next task), so a policy that degrades late in
+a phase is not carried forward. ``--step-scale-end`` (StreamX) anneals the step size within each phase.
 
 ``--mode continue`` carries the networks, the observation statistics and (MAPPO) nothing else from
 task to task; the reward scale and the eligibility traces start over with each task. ``--mode scratch``
@@ -28,7 +34,9 @@ Logged to ``RUN/metrics.parquet`` (and Trackio), x axis = team steps over the wh
 """
 
 import argparse
+import copy
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -41,13 +49,14 @@ import trackio  # noqa: E402
 from streampilot.baselines import mappo  # noqa: E402
 from streampilot.policy import TeamPolicy  # noqa: E402
 from streampilot.stream_x import agents as stream_ac  # noqa: E402
-from streampilot.stream_x.multi_agent import IndependentStreamAC  # noqa: E402
+from streampilot.stream_x.multi_agent import CentralizedStreamAC, IndependentStreamAC  # noqa: E402
 from streampilot.stream_x.wrappers import RunningMeanStd  # noqa: E402
 from streampilot.train_formation import EPSILON, TASKS, RunLog, Team, pick_device, summarize  # noqa: E402
 from streampilot.train_formation import save_checkpoint as save_mappo  # noqa: E402
 from streampilot.train_formation_stream import make_env  # noqa: E402
 from streampilot.vec_env import FormationVecEnv, episode_summary  # noqa: E402
 
+STREAM_METHODS = ("stream", "cstream")  # StreamX with independent critics, or one centralised critic
 SEQUENCE = ["formation-tracking", "formation-waypoint", "formation-landing", "formation-tracking"]
 TASK_IDS = {"formation-tracking": 0, "formation-waypoint": 1, "formation-landing": 2}  # as in the report script
 EVAL_SEED = 10_000
@@ -99,19 +108,26 @@ class StreamRunner:
         self.env = make_env({**self.config, "task": task})
         obs_dim, action_dim = int(np.prod(self.env.observation_space.shape[1:])), self.env.action_space.shape[1]
         if fresh or self.team is None:
-            self.team = IndependentStreamAC(
+            learner = CentralizedStreamAC if a.method == "cstream" else IndependentStreamAC
+            self.team = learner(
                 a.drones, obs_dim, action_dim, a.frames, gamma=a.gamma, hidden_size=a.hidden_size, lr=a.lr,
-                lamda=a.lamda, kappa_policy=a.kappa_policy, kappa_value=a.kappa_value, entropy_coeff=a.entropy_coeff,
+                lamda=a.lamda, kappa_policy=a.kappa_policy, kappa_value=a.kappa_value, entropy_coeff=a.entropy_coeff, init_std=a.init_std, bound_mean=a.bound_mean, max_std=a.max_std,
             )  # fmt: skip
+            if a.compile:
+                self.team.compile()
         else:
             self.team.new_task()
         obs, _ = self.env.reset(seed=seed)
         self.team.reset(obs)
         self.total, self.length = 0.0, 0
+        self.local = 0  # team steps into this phase, for the step-size schedule
 
     def run(self, steps: int, log) -> int:
-        team, env = self.team, self.env
+        team, env, end = self.team, self.env, self.args.step_scale_end
         for _ in range(steps):
+            if end is not None:  # decays within each phase, back to full size when a new task starts
+                team.set_step_scale(1.0 + (end - 1.0) * self.local / self.phase_steps)
+            self.local += 1
             actions = team.act()
             obs, reward, terminated, truncated, info = env.step(actions)
             done = terminated or truncated
@@ -127,6 +143,18 @@ class StreamRunner:
 
     def swap(self, drone: int) -> None:
         self.team.reset_drone(drone)
+
+    def snapshot(self) -> dict:
+        """The team's weights and observation statistics, to ``restore`` later."""
+        params = [*self.team.actor.parameters(), *self.team.critic.parameters()]
+        return {"params": [p.detach().clone() for p in params], "obs_stats": copy.deepcopy(self.team.obs_stats)}
+
+    def restore(self, snapshot: dict) -> None:
+        """Back to a ``snapshot``, in place (the optimizers and compiled updates keep their tensors)."""
+        with torch.no_grad():
+            for p, saved in zip([*self.team.actor.parameters(), *self.team.critic.parameters()], snapshot["params"]):
+                p.copy_(saved)
+        self.team.obs_stats = copy.deepcopy(snapshot["obs_stats"])
 
     def save(self, path: Path) -> None:
         base = self.env.unwrapped
@@ -204,6 +232,21 @@ class MappoRunner:
     def swap(self, drone: int) -> None:
         raise NotImplementedError("MAPPO's drones share one actor")
 
+    def snapshot(self) -> dict:
+        """The agent's networks and the team's observation normalization, to ``restore`` later."""
+        return copy.deepcopy(
+            {
+                "actor": self.agent.actor.state_dict(),
+                "critic": self.agent.critic.state_dict(),
+                "norm": (self.team.actor_norm, self.team.critic_norm),
+            }
+        )
+
+    def restore(self, snapshot: dict) -> None:
+        self.agent.actor.load_state_dict(snapshot["actor"])
+        self.agent.critic.load_state_dict(snapshot["critic"])
+        self.team.actor_norm, self.team.critic_norm = copy.deepcopy(snapshot["norm"])
+
     def save(self, path: Path) -> None:
         save_mappo(path, self.config, self.agent, self.team)
 
@@ -213,8 +256,13 @@ class MappoRunner:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Task sequence (tracking, waypoint, landing, tracking) for E2.1.")
-    parser.add_argument("--method", choices=["stream", "mappo", "ippo"], default="stream")
+    parser = argparse.ArgumentParser(description="Task sequence (tracking, waypoint, landing, tracking).")
+    parser.add_argument(
+        "--method",
+        choices=["stream", "cstream", "mappo", "ippo"],
+        default="stream",
+        help="stream: StreamX with a critic per drone; cstream: StreamX with one centralised critic (CTDE)",
+    )
     parser.add_argument(
         "--mode", choices=["continue", "scratch"], default="continue", help="carry the learner over, or start anew per task"
     )
@@ -224,6 +272,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--obs-mode", choices=["detection", "state"], default="detection")
     parser.add_argument("--frames", type=int, default=4)
+    parser.add_argument(
+        "--step-scale-end",
+        type=float,
+        default=None,
+        help="StreamX: within each phase, anneal the effective step size linearly from 1x to this factor, back to "
+        "1x at the next task (default: constant). Keeps a policy that works from being unlearned late in a phase",
+    )
+    parser.add_argument(
+        "--restore-best",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="at the end of each phase, roll the learner back to that phase's best evaluation (best_phaseN.pt, "
+        "always saved) before the probes and the next task",
+    )
+    parser.add_argument(
+        "--compile",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="StreamX: fuse each learner's update with torch.compile (same math, faster; ~1 min to compile per new learner)",
+    )
     parser.add_argument("--detection-noise", type=float, default=0.0)
     parser.add_argument("--detection-dropout", type=float, default=0.0)
     parser.add_argument("--eval-every", type=int, default=50_000, help="team steps between evaluations")
@@ -239,7 +307,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project", default="streampilot")
     # The two hyperparameter sets share option names (--lr, --gamma, ...) with different defaults: add the chosen one.
     method = parser.parse_known_args()[0].method
-    if method == "stream":
+    if method in STREAM_METHODS:
         stream_ac.add_args(parser.add_argument_group("Stream AC hyperparameters"))
     else:
         mappo.add_args(parser.add_argument_group("MAPPO / IPPO hyperparameters"))
@@ -248,9 +316,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.swap_phase is not None and args.method != "stream":
-        raise SystemExit("--swap-phase needs --method stream: MAPPO's drones share one actor, there is no drone to swap")
-    torch.set_num_threads(1 if args.method == "stream" else torch.get_num_threads())
+    if args.swap_phase is not None and args.method not in STREAM_METHODS:
+        raise SystemExit("--swap-phase needs a StreamX method: MAPPO's drones share one actor, there is no drone to swap")
+    torch.set_num_threads(1 if args.method in STREAM_METHODS else torch.get_num_threads())
     torch.manual_seed(args.seed)
     drones = "" if args.drones == 3 else f"_{args.drones}d"
     out = args.out or Path("runs") / f"continual_{args.method}-{args.mode}{drones}_seed{args.seed}"
@@ -262,16 +330,17 @@ def main() -> None:
         env_kwargs |= {"detection_noise": args.detection_noise, "detection_dropout": args.detection_dropout}
     config = {
         "task": args.sequence[0],
-        "algo": {"stream": "istream_ac"}.get(args.method, args.method),
+        "algo": {"stream": "istream_ac", "cstream": "cstream_ac"}.get(args.method, args.method),
         "obs_mode": args.obs_mode,
         "env_kwargs": env_kwargs,
         "num_frames": args.frames,
         "hidden_size": args.hidden_size,
         "gamma": args.gamma,
+        "bound_mean": getattr(args, "bound_mean", False),  # StreamX only
         "critic_state": False,
         "curriculum_fraction": 0.0,
     }
-    runner = (StreamRunner if args.method == "stream" else MappoRunner)(args, config)
+    runner = (StreamRunner if args.method in STREAM_METHODS else MappoRunner)(args, config)
     k = runner.phase_steps
     if args.swap_phase is not None and not 0 <= args.swap_phase < len(args.sequence):
         raise SystemExit("--swap-phase is out of the sequence")
@@ -288,15 +357,24 @@ def main() -> None:
         # Task rows carry these, so the report can slice by phase and task.
         tags = {"phase": phase, "task_id": TASK_IDS[task]}
         runner.begin(task, fresh=args.mode == "scratch" or phase == 0, seed=args.seed + phase)
+        # This phase's best evaluation: by eval/score, then eval/return (the score is often 0 early on, and a
+        # tie must not pick the untrained start of the phase), and the later one on a full tie.
+        best_score, best_snapshot = (-np.inf, -np.inf), None
 
         def log_row(extra: dict, local: int) -> None:
             logger.log(tags | {"phase_step": local} | extra, base + local)
 
         def evaluate_now(local: int, episodes: int, **extra) -> None:
-            nonlocal eval_seconds
+            nonlocal eval_seconds, best_score, best_snapshot
             t0 = time.perf_counter()
             runner.save(ckpt)
             row = evaluate(ckpt, config, task, episodes) | extra
+            score = (row["eval/score"], row["eval/return"])
+            if score >= best_score:
+                best_score = score
+                shutil.copy(ckpt, out / f"best_phase{phase}.pt")
+                if args.restore_best:
+                    best_snapshot = runner.snapshot()
             if snapshot is not None:
                 row |= {k_.replace("eval/", "frozen/", 1): v for k_, v in frozen.items()}
             log_row(row, local)
@@ -313,6 +391,7 @@ def main() -> None:
             frozen = evaluate(snapshot, config, task, args.eval_episodes)
         evaluate_now(0, args.eval_episodes)
         swap_at = int(args.swap_at * k) if args.swap_phase == phase else None
+        next_eval = args.eval_every  # PPO advances in whole updates, so done_steps rarely lands on a multiple
         while done_steps < k:
             chunk = min(args.eval_every, k - done_steps)
             if swap_at is not None and done_steps < swap_at:
@@ -323,12 +402,16 @@ def main() -> None:
                 runner.swap(args.swap_drone)
                 evaluate_now(done_steps, args.eval_episodes, event_swap=1)
                 swap_at = None
-            elif done_steps % args.eval_every == 0 or done_steps >= k:
+            elif done_steps >= next_eval or done_steps >= k:
                 evaluate_now(done_steps, args.eval_episodes)
+                next_eval = (done_steps // args.eval_every + 1) * args.eval_every
 
         # End of the phase: the checkpoint, and the policy on every task.
+        if args.restore_best and best_snapshot is not None:
+            runner.restore(best_snapshot)
+            print(f"phase {phase} {task:<18} restored the phase's best evaluation (score {best_score[0]:.2f}, return {best_score[1]:.1f})", flush=True)
         runner.save(out / f"after_phase{phase}.pt")
-        for probe_task in TASKS:
+        for probe_task in TASK_IDS:
             probe = evaluate(out / f"after_phase{phase}.pt", config, probe_task, args.probe_episodes)
             log_row({k_.replace("eval/", "probe/", 1): v for k_, v in probe.items()} | {"probe_task": TASK_IDS[probe_task]}, k)
         logger.flush()

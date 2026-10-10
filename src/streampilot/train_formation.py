@@ -18,6 +18,7 @@ end. Watch a checkpoint with ``uv run streampilot TASK --policy RUN_DIR/final.pt
 """
 
 import argparse
+import json
 import os
 import time
 from collections import defaultdict
@@ -39,6 +40,10 @@ TASKS = {
     "formation-waypoint": "DroneFormationWaypoint-v0",
     "formation-landing": "DroneFormationLanding-v0",
     "formation-tracking": "DroneFormationTracking-v0",
+    "formation-factory": "DroneFormationFactory-v0",
+    "formation-warehouse-waypoint": "DroneFormationWarehouseWaypoint-v0",
+    "formation-warehouse-landing": "DroneFormationWarehouseLanding-v0",
+    "formation-warehouse-tracking": "DroneFormationWarehouseTracking-v0",
 }
 EPSILON = 1e-8
 
@@ -206,6 +211,7 @@ def parse_args() -> argparse.Namespace:
         "over this fraction of the steps, then hold them (0: no curriculum, the full levels from the start). "
         "Evaluations always use the full levels",
     )
+    parser.add_argument("--env-kwargs", type=json.loads, default={}, help="JSON, extra keyword arguments for the environment")
     parser.add_argument(
         "--critic-state",
         action=argparse.BooleanOptionalAction,
@@ -238,7 +244,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     logger = RunLog(out)
 
-    env_kwargs = {"num_drones": args.drones, "obs_mode": args.obs_mode}
+    env_kwargs = {"num_drones": args.drones, "obs_mode": args.obs_mode, **args.env_kwargs}
     if args.obs_mode == "detection":
         env_kwargs |= {"detection_noise": args.detection_noise, "detection_dropout": args.detection_dropout}
     config = {

@@ -27,6 +27,7 @@ EPISODE_INFO = (
     "heading_error",
     "mean_target_in_view",
     "mean_on_target",
+    "inspection_coverage",
     "mean_formation_error",
     "mean_heading_error",
     "mean_standoff_error",

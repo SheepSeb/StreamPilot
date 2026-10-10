@@ -35,7 +35,8 @@ class Policy:
         obs_dim, action_dim = checkpoint["obs_dim"], checkpoint["action_dim"]
         self.history = ObservationHistory(obs_dim, action_dim, self.config["num_frames"])
         actor_cls = ACTORS[self.config.get("algo", "stream_ac")]  # checkpoints before baselines were Stream AC
-        self.actor = actor_cls(self.history.dim, action_dim, self.config["hidden_size"])
+        options = {"bound_mean": True} if self.config.get("bound_mean") else {}  # Stream AC actors
+        self.actor = actor_cls(self.history.dim, action_dim, self.config["hidden_size"], **options)
         self.actor.load_state_dict(checkpoint["actor"])
         self.actor.eval()
         stats = checkpoint["obs_stats"]  # None when the algorithm does not normalize observations

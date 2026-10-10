@@ -1,20 +1,11 @@
-"""Formation tracking, N = 3: detection dropout x noise.
+"""Formation tracking, N = 3, under detection dropout x noise (7 x 7 grid).
 
-    uv run python scripts/compare_dropout_noise.py train      # -> runs_dropout_noise/
-    uv run python scripts/compare_dropout_noise.py eval       # tables + runs_dropout_noise/results.csv
-    uv run python scripts/compare_dropout_noise.py plot       # one heatmap per method
-    uv run python scripts/compare_dropout_noise.py train --methods ippo --seeds 1
-    uv run python scripts/compare_dropout_noise.py shift      # no training: runs/ N = 3 checkpoints under all conditions
-    uv run python scripts/compare_dropout_noise.py curriculum # train with a noise curriculum -> runs_dropout_noise/curriculum/
-    uv run python scripts/compare_dropout_noise.py shift --source curriculum   # ... and evaluate those under all conditions
+    uv run python scripts/compare_dropout_noise.py train|eval|plot      # runs_dropout_noise/
+    uv run python scripts/compare_dropout_noise.py shift                # runs/ checkpoints under every condition
+    uv run python scripts/compare_dropout_noise.py curriculum           # train with a noise curriculum
+    uv run python scripts/compare_dropout_noise.py shift --source curriculum
 
-Detection dropout p in {0, .05, .1, .2, .3, .4, .5} x detection noise in {0, .05, .1, .2, .3, .4, .5}: 49 conditions, N = 3.
-Runs that already have a final.pt are skipped, so an interrupted ``train`` resumes.
-
-Evaluation is on the same deterministic episodes (seeds 10000...), under the conditions the run was trained with.
-
-Curriculum: the detection starts clean and degrades linearly to --level (dropout, noise) over the first
---curriculum-fraction of the steps, then stays there. Each learner trains once per seed.
+Runs with a final.pt are skipped, so ``train`` resumes. Evaluation uses the fixed episode seeds 10000...
 """
 
 import argparse

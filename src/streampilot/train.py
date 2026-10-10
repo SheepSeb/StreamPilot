@@ -139,6 +139,7 @@ def main() -> None:
         "num_frames": args.frames,
         "hidden_size": args.hidden_size,
         "gamma": args.gamma,
+        "bound_mean": getattr(args, "bound_mean", False),
     }
     env = make_env(config)
     env.action_space.seed(args.seed)

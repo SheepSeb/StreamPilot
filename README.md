@@ -304,7 +304,7 @@ Runs go to `runs/cstream_ac_TASK[_2d]_seedSEED/` and log the team TD error as
 `train/abs_td_error`. A test checks that the batched version matches one plain `Critic` plus
 one plain `Actor` per drone, each with its own `ObGD`, step for step.
 
-## Task sequence: adaptation and forgetting (E2.1)
+## Task sequence: adaptation and forgetting
 
 One team trains on tracking, then waypoint, then landing, then tracking again (`--steps-per-task` K team
 steps each). Conditions: StreamX continuing to learn, StreamX frozen after the first phase (scored inside the

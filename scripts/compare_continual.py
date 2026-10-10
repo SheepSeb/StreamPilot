@@ -1,24 +1,12 @@
-"""E2.1 task sequence (tracking -> waypoint -> landing -> tracking): run the conditions, report, plot.
+"""Task sequence (tracking -> waypoint -> landing -> tracking): train the conditions, report, plot.
 
     uv run python scripts/compare_continual.py train --steps 1000000 --seeds 1 2 3
-    uv run python scripts/compare_continual.py report
+    uv run python scripts/compare_continual.py report    # -> runs/compare_continual.csv
     uv run python scripts/compare_continual.py plot
 
-Conditions (``streampilot-continual --method M --mode X``), runs/continual_M-X_seedS/:
-  stream-continue  StreamX keeps learning          stream-scratch   StreamX, a fresh learner on every task
-  mappo-continue   MAPPO fine-tuned                mappo-scratch    MAPPO, a fresh learner on every task (the reference for its transfer)
-  stream-frozen    StreamX frozen after the first phase: scored inside the stream-continue runs (``frozen/`` keys)
-Add ``--methods ippo`` for IPPO. ``--swap-phase P`` (stream-continue only) also swaps a drone mid-phase.
-
-``report`` prints, as mean +- std over seeds, and writes runs/compare_continual.csv:
-  per phase and condition (the end-of-phase probe, 50 episodes): success rate, time to complete [steps, successful
-    episodes only], accuracy [m] (waypoint: distance to the ball, landing: slot error, tracking: standoff error)
-  forward transfer (FT): per task, the area under the evaluation-score curve over the phase (zero-shot start
-    included) minus that of the same task trained from scratch with the same method, in score units
-  backward transfer (BWT): tracking score after the other tasks (end of the landing phase, before relearning) minus
-    at the end of the first phase. Negative: forgetting
-  recovery: steps from the start of a phase (the task change) until the score is >= --recover of the scratch
-    learner's final score on that task (inf: never); after a swap, until it is >= --recover of the pre-swap score
+Conditions: stream/mappo x continue/scratch (``--methods ippo`` adds IPPO); stream-frozen is scored inside the
+stream-continue runs. ``report``: per phase, success, time to complete and accuracy; forward transfer (AUC minus
+scratch), backward transfer (tracking after landing minus after phase 1) and recovery steps.
 """
 
 import argparse
