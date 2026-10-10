@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <style>
+    .frame { stroke: #1d2129; fill: #1d2129; }
+    @media (prefers-color-scheme: dark) { .frame { stroke: #e6e8ec; fill: #e6e8ec; } }
+  </style>
+  <!-- Top-down quadcopter: crossed arms, four rotors, central body -->
+  <g class="frame" stroke-width="6" stroke-linecap="round">
+    <line x1="16" y1="16" x2="48" y2="48"/>
+    <line x1="48" y1="16" x2="16" y2="48"/>
+  </g>
+  <g fill="#2f6fde" fill-opacity="0.35" stroke="#2f6fde" stroke-width="5">
+    <circle cx="14" cy="14" r="11"/>
+    <circle cx="50" cy="14" r="11"/>
+    <circle cx="14" cy="50" r="11"/>
+    <circle cx="50" cy="50" r="11"/>
+  </g>
+  <rect class="frame" x="23" y="23" width="18" height="18" rx="5" stroke="none"/>
+  <circle cx="32" cy="32" r="3.5" fill="#2f6fde"/>
+</svg>

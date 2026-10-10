@@ -38,7 +38,10 @@ h3 { font-size: 1.1rem; font-weight: 600; margin: 1.5rem 0 0.5rem; }
 
 /* Hero */
 .hero { padding: 4rem 0 2rem; text-align: center; }
-.title { font-size: clamp(2.4rem, 6vw, 3.6rem); font-weight: 700; margin: 0; letter-spacing: -0.02em; }
+.title { font-size: clamp(2.4rem, 6vw, 3.6rem); font-weight: 700; margin: 0; display: flex; align-items: center; justify-content: center; gap: 0.3em; letter-spacing: -0.02em; }
+.title-icon { width: 0.95em; height: 0.95em; flex: none; animation: hover 3s ease-in-out infinite; }
+@keyframes hover { 50% { transform: translateY(-0.08em) rotate(-4deg); } }
+@media (prefers-reduced-motion: reduce) { .title-icon { animation: none; } }
 .subtitle { font-size: clamp(1.1rem, 2.6vw, 1.45rem); color: var(--muted); margin: 0.5rem auto 1.5rem; max-width: 720px; line-height: 1.4; }
 .links { display: flex; flex-wrap: wrap; gap: 0.6rem; justify-content: center; }
 .btn {
